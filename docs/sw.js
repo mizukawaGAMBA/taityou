@@ -1,6 +1,6 @@
 /* Service Worker — 画面のファイルをキャッシュして、通信が不安定でも開けるようにする。
  * API(別オリジンの Apps Script)はキャッシュしない。更新は「ネットワーク優先、失敗したらキャッシュ」。 */
-const CACHE = 'kuma-v5';
+const CACHE = 'kuma-v6';
 const KEEP = ['kuma-uploads']; // サイトで登録した画像の保存場所(アプリの更新では消さない)
 const SHELL = [
   './', './index.html', './app.js', './config.js', './style.css', './manifest.webmanifest',

@@ -268,7 +268,7 @@ function toCell(v) {
  * 日付は「論理日」(午前4時区切り)の "YYYY-MM-DD" 文字列。時刻は "HH:MM"。
  * ===================================================================== */
 var Core = (function () {
-  var VERSION = 5;
+  var VERSION = 6;
   var IMAGE_PARTS = 10;       // 1 枚の画像を最大 10 個のセルに分けて入れる
   var IMAGE_CHUNK = 40000;    // 1 セルに入れる文字数(セルの上限は 50,000 文字)
   var IMAGE_META_COLS = 7;    // 画像の表の、データ以外の列の数
@@ -295,6 +295,7 @@ var Core = (function () {
   };
 
   var DEFAULT_SETTINGS = {
+    app_title: '',                         // 記録する人の画面のタイトル(空なら「くまの記録」。本人の画面には出ない)
     patient_name: '',
     supporter_name: '',
     med2_label: '',                        // 3 つ目の薬のボタン名(空なら「朝の薬」「寝る前の薬」の 2 つだけ)

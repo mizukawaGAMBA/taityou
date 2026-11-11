@@ -125,6 +125,7 @@
     return { loaded: !!src, library, slots, reactions };
   })();
   const settingsNow = () => (cache && cache.settings) || {};
+  const appTitle = () => String(settingsNow().app_title || '').trim() || 'くまの記録';
   function siteConfig() {
     const raw = settingsNow().image_config;
     if (!raw) return {};
@@ -493,7 +494,7 @@
     else if (tab === 'list') body = viewList();
     else if (tab === 'kuma') body = viewKuma(data);
     else if (tab === 'settings') body = viewSettings(data);
-    return topbar('くまの記録', right) + tabs + body;
+    return topbar(esc(appTitle()), right) + tabs + body;
   }
 
   function scaleField(key, o, extra, noLabel) {
@@ -663,6 +664,7 @@
     const f = (name, label, type, help, ph) => `<label class="field"><span>${label}</span><input type="${type || 'text'}" name="${name}" value="${esc(s[name] || '')}" ${ph ? `placeholder="${esc(ph)}"` : ''}>${help ? `<div class="help">${help}</div>` : ''}</label>`;
     return `<form id="settings-form" class="card">
       <h2>設定</h2>
+      ${f('app_title', 'アプリのタイトル', 'text', 'この画面(記録する人)のいちばん上に出ます。本人の画面には出ません。空欄なら「くまの記録」', '例: くまの記録')}
       ${f('patient_name', '本人の名前', 'text', 'レポートに印字します(空欄でも可)')}
       ${f('supporter_name', '記録する人の名前', 'text', '本人の同意の画面に「届く先: ○○さん」と出ます')}
       ${f('med2_label', '朝の薬で分けて書く薬の名前', 'text', '朝の薬のボタン(「○○全部飲んだ」「○○一部飲んだ」「○○以外飲んだ」)の○○に出ます。名前はスプレッドシートにだけ保存され、GitHub には出ません', '例: お薬の名前')}
@@ -910,7 +912,7 @@
   function saveSettings(form) {
     const f = new FormData(form);
     const settings = {};
-    ['patient_name', 'supporter_name', 'med2_label', 'last_appointment', 'next_appointment', 'report_note'].forEach((k) => { settings[k] = String(f.get(k) || '').trim(); });
+    ['app_title', 'patient_name', 'supporter_name', 'med2_label', 'last_appointment', 'next_appointment', 'report_note'].forEach((k) => { settings[k] = String(f.get(k) || '').trim().slice(0, k === 'report_note' ? 2000 : 40); });
     enqueue({ action: 'saveSettings', settings }, (c) => { c.settings = Object.assign({}, c.settings, settings); });
     listData = null;
     toast('設定を保存しました');
@@ -1062,6 +1064,7 @@
     if (isEditing()) { pendingRender = true; return; }
     pendingRender = false;
     const root = document.getElementById('app');
+    document.title = cfg.token && cfg.role === 'supporter' ? appTitle() : 'くま'; // ブラウザのタブの名前
     if (!cfg.token) { root.innerHTML = viewLogin(); renderOverlay(); return; }
     let data = null;
     if (cfg.role === 'supporter') data = cache && cache.date === curDate && 'obs' in cache ? cache : null;
