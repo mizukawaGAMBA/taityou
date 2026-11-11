@@ -65,6 +65,28 @@
   };
   const EASY = [['morning', '朝'], ['noon', '昼'], ['evening', '夕方'], ['night', '夜']];
   const COMPLAINT = [['pain', '痛み'], ['dizzy', 'ぐるぐる'], ['other', 'その他']];
+  const ACTIVITY = [['work', '会社出勤'], ['overtime', '+残業'], ['lesson', '習い事'], ['ballet', 'バレエ']];
+  const SET_OPTS = { easy_times: EASY, complaint: COMPLAINT, activity: ACTIVITY };
+  // 記録画面のカテゴリー。並び順は「設定」タブで変えられる(settings の card_order)
+  const CARD_DEFS = [['sleep', '昨夜の眠り'], ['morning', '朝のようす'], ['day', '日中のようす'], ['look', '見た目のようす・本人のことば'],
+    ['easy', '楽そうだった時間・できたこと'], ['meds', 'おくすり'], ['alcohol', 'アルコール'], ['memo', '気になったこと']];
+  function cardOrder(s) {
+    const known = CARD_DEFS.map((d) => d[0]);
+    const saved = [];
+    String((s && s.card_order) || '').split(',').forEach((k) => { if (known.includes(k) && !saved.includes(k)) saved.push(k); });
+    return saved.concat(known.filter((k) => !saved.includes(k)));
+  }
+  // 時刻は 4 桁の数字で入れる: "0815" "815" "08:15" "０８１５" → "08:15"。空なら ''、読めなければ null
+  function parseHm(v) {
+    const d = String(v || '').replace(/[０-９]/g, (c) => String.fromCharCode(c.charCodeAt(0) - 0xFEE0)).replace(/[^0-9]/g, '');
+    if (!d) return '';
+    if (d.length < 3 || d.length > 4) return null;
+    const h = parseInt(d.slice(0, -2), 10), m = parseInt(d.slice(-2), 10);
+    if (h > 23 || m > 59) return null;
+    return `${pad(h)}:${pad(m)}`;
+  }
+  // 欄には 4 桁で出す("07:30" → "0730")
+  const hmInput = (attrs, value) => `<input type="text" class="hm" inputmode="numeric" autocomplete="off" maxlength="5" placeholder="例: 0730" value="${esc(String(value || '').replace(':', ''))}" ${attrs}>`;
   // 朝の薬のボタンには、設定の「朝の薬で分けて書く薬の名前」を出す(名前はスプレッドシートにだけ保存し、プログラムには書かない)
   const medName = (s) => String(s.med2_label || '').trim() || '別の薬';
   function medRows(s) {
@@ -503,7 +525,7 @@
       progress = `<p class="progress-line small">${s.last_appointment ? `前回の診察(${jpShort(pr.since)})から` : `${jpShort(pr.since)}から`} 記録 <b>${pr.recorded}日</b> / ${pr.days}日${left != null ? `<br>次の診察まで <b>${left >= 0 ? left + '日' : '過ぎています'}</b>` : ''}</p>`;
     }
     const wake = `<div class="obs-field"><div class="obs-label">起きてきた時刻</div><div class="row">
-        <input type="time" data-obs="wake_time" value="${esc(o.wake_time || '')}" style="max-width:160px">
+        ${hmInput('data-obs-hm="wake_time" style="max-width:150px" aria-label="起きてきた時刻(4桁)"', o.wake_time)}
         ${curDate === today ? '<button class="btn outline" style="width:auto;min-height:52px" data-act="wake-now">いま</button>' : ''}</div></div>`;
     const isToday = curDate === today;
     const medBtn = (f, k, label, title, m) => {
@@ -521,21 +543,25 @@
         ${!times.length && o.prn ? `<span class="pill">${o.prn}回(時刻なし)</span>` : ''}</div></div>`;
     const medHelp = `<p class="help">${isToday ? '押すと今の時刻で記録します。<b>長押し</b>すると時刻を入れられます。' : '前の日の分は、押すと時刻を入れる欄が開きます。'}もう一度押すと取り消せます。${s.med2_label ? '' : '<br>「設定」タブの「朝の薬で分けて書く薬の名前」を入れると、ボタンにその名前が出ます。'}</p>`;
     const snack = `<button class="chip-btn snack ${o.night_snack === 1 ? 'sel' : ''}" data-act="obs" data-f="night_snack" data-v="1" aria-pressed="${o.night_snack === 1}">寝る前の間食</button>`;
-    return nav + progress + sleepCard(data.health, s) +
-      card('朝のようす', wake + scaleField('getup', o) + noteField(o, 'note_morning', '例: 起きてすぐはふらついていた')) +
-      card('日中のようす', scaleField('gait', o) + scaleField('lying', o) + scaleField('outing', o) + scaleField('meal', o, snack) +
-        noteField(o, 'note_day', '例: 昼過ぎに2時間ほど横になっていた')) +
-      card('見た目のようす・本人のことば', scaleField('movement', o) +
+    const cards = {
+      sleep: () => sleepCard(data.health, s),
+      morning: () => card('朝のようす', wake + scaleField('getup', o) + noteField(o, 'note_morning', '例: 起きてすぐはふらついていた')),
+      day: () => card('日中のようす', scaleField('gait', o) + scaleField('lying', o) + scaleField('outing', o) +
+        `<div class="obs-field"><div class="obs-label">仕事・習い事</div>${setChips('activity', ACTIVITY, o.activity)}</div>` +
+        scaleField('meal', o, snack) + noteField(o, 'note_day', '例: 昼過ぎに2時間ほど横になっていた')),
+      look: () => card('見た目のようす・本人のことば', scaleField('movement', o) +
         '<p class="help" style="margin:-8px 0 14px">あなたの目で見た印象で大丈夫です。いちばん目立った時で。</p>' +
         `<div class="obs-field"><div class="obs-label">本人が自分から口にしたこと</div>${setChips('complaint', COMPLAINT, o.complaint)}
           <p class="help">こちらからは聞きません。本人が自分から言った時だけ押します。</p></div>` +
-        noteField(o, 'complaint_note', '例: 口の動きが目立った / 夕方に「足が痛い」と言った')) +
-      card('楽そうだった時間・できたこと', `<div class="obs-field"><div class="obs-label">楽そうだった時間帯</div>${setChips('easy_times', EASY, o.easy_times)}</div>` +
+        noteField(o, 'complaint_note', '例: 口の動きが目立った / 夕方に「足が痛い」と言った')),
+      easy: () => card('楽そうだった時間・できたこと', `<div class="obs-field"><div class="obs-label">楽そうだった時間帯</div>${setChips('easy_times', EASY, o.easy_times)}</div>` +
         noteField(o, 'good_note', '例: ドラマを見て笑っていた / 一緒に買い物に行けた') +
-        '<p class="help">本人には聞かずに、見ていて気づいたことや、本人が自分から話したことだけ。</p>') +
-      card('おくすり', meds + prn + medHelp + noteField(o, 'note_meds', '例: 寝る前の薬を飲むのが遅くなった')) +
-      card('アルコール', scaleField('alcohol', o, '', true) + noteField(o, 'note_alcohol', '例: 夕食でビールをコップ1杯')) +
-      memoCard(data, curDate) +
+        '<p class="help">本人には聞かずに、見ていて気づいたことや、本人が自分から話したことだけ。</p>'),
+      meds: () => card('おくすり', meds + prn + medHelp + noteField(o, 'note_meds', '例: 寝る前の薬を飲むのが遅くなった')),
+      alcohol: () => card('アルコール', scaleField('alcohol', o, '', true) + noteField(o, 'note_alcohol', '例: 夕食でビールをコップ1杯')),
+      memo: () => memoCard(data, curDate)
+    };
+    return nav + progress + cardOrder(s).map((k) => cards[k]()).join('') +
       `<p class="help center" style="margin:4px 0 20px">押した内容はその場で保存されます。</p>`;
   }
 
@@ -644,9 +670,25 @@
       <label class="field"><span>先生に伝えたいこと</span><textarea name="report_note" maxlength="2000" placeholder="例: 本人に症状を尋ねると痛みが強くなるため、家族の観察で記録しています。">${esc(s.report_note || '')}</textarea><div class="help">レポートのいちばん上に印刷されます。</div></label>
       <button type="submit" class="btn primary" style="margin-top:4px">設定を保存</button>
     </form>
+    ${orderCardHTML(s)}
     ${healthAdminHTML(s)}
     <section class="card"><h2>この端末</h2><p class="small">ログイン中: ${esc(cfg.name || '')}(記録する人)</p>
       <button class="btn ghost" data-act="logout" style="margin-top:8px">ログアウト</button></section>`;
+  }
+
+  // 記録画面のカテゴリーの並び順(↑↓ で入れ替え、すぐ保存)
+  function orderCardHTML(s) {
+    const order = cardOrder(s);
+    const name = (k) => (CARD_DEFS.find((d) => d[0] === k) || [k, k])[1];
+    return `<section class="card"><h2>記録画面の並び順</h2>
+      <ol class="order-list">${order.map((k, i) => `<li><span class="spacer">${esc(name(k))}</span>
+        <button class="icon-btn" data-act="order" data-k="${k}" data-d="-1" aria-label="${esc(name(k))}を上へ" ${i === 0 ? 'disabled' : ''}>↑</button>
+        <button class="icon-btn" data-act="order" data-k="${k}" data-d="1" aria-label="${esc(name(k))}を下へ" ${i === order.length - 1 ? 'disabled' : ''}>↓</button></li>`).join('')}</ol>
+      <button class="btn ghost" data-act="order-reset" style="margin-top:6px">最初の並びに戻す</button></section>`;
+  }
+  function saveOrder(order) {
+    const settings = { card_order: order.join(',') };
+    enqueue({ action: 'saveSettings', settings }, (c) => { c.settings = Object.assign({}, c.settings, settings); });
   }
 
   // 記録する人用: 連携の準備の手順と、いまの状態
@@ -814,13 +856,21 @@
   }
   function medTimeSheetHTML() {
     return wrapSheet(`<h3>${esc(sheet.label)}</h3>
-      <label class="field"><span>飲んだ時刻</span><input type="time" id="med-time" value="${esc(sheet.time)}"></label>
+      <label class="field"><span>飲んだ時刻(4桁の数字。例: 0815 = 8時15分)</span>${hmInput('id="med-time" aria-label="飲んだ時刻(4桁)"', sheet.time)}</label>
+      <p class="help" id="med-time-view">${esc(hmView(sheet.time))}</p>
       ${curDate !== logicalToday() ? `<p class="help">${jpDate(curDate)}の分として記録します。深夜 0〜3 時台の時刻は、その前の日の夜の分になります。</p>` : ''}
       <div class="actions"><button class="btn primary" data-act="medtime-save">この時刻で記録</button><button class="btn ghost" data-act="sheet-close">やめる</button></div>`);
   }
+  function hmView(v) {
+    const t = parseHm(v);
+    if (t === '') return '時刻を4桁の数字で入れてください';
+    if (t === null) return '時刻が読めません。4桁の数字で入れてください(例: 0815)';
+    const [h, m] = t.split(':').map(Number);
+    return `→ ${h}時${m}分`;
+  }
   function medTimeSave() {
-    const t = String(sheet.time || '').slice(0, 5);
-    if (!/^\d{2}:\d{2}$/.test(t)) { toast('時刻を入れてください'); return; }
+    const t = parseHm(sheet.time);
+    if (!t) { toast('時刻を4桁の数字で入れてください(例: 0815)'); return; }
     const { f, v, label, replace } = sheet;
     sheet = null; renderOverlay();
     if (f === 'prn') {
@@ -1068,7 +1118,11 @@
         const f = el.dataset.f; const v = el.dataset.v;
         const cur = new Set(String(obsNow()[f] || '').split(',').filter(Boolean));
         if (cur.has(v)) cur.delete(v); else cur.add(v);
-        saveObs({ [f]: (f === 'easy_times' ? EASY : COMPLAINT).map((x) => x[0]).filter((x) => cur.has(x)).join(',') });
+        if (f === 'activity') { // 残業は出勤した日だけ: 残業を選ぶと出勤も、出勤を外すと残業も
+          if (v === 'overtime' && cur.has('overtime')) cur.add('work');
+          if (v === 'work' && !cur.has('work')) cur.delete('overtime');
+        }
+        saveObs({ [f]: SET_OPTS[f].map((x) => x[0]).filter((x) => cur.has(x)).join(',') });
         break;
       }
       case 'med': {
@@ -1095,6 +1149,14 @@
         break;
       }
       case 'medtime-save': medTimeSave(); break;
+      case 'order': {
+        const order = cardOrder(settingsNow()); const i = order.indexOf(el.dataset.k); const j = i + parseInt(el.dataset.d, 10);
+        if (i < 0 || j < 0 || j >= order.length) break;
+        [order[i], order[j]] = [order[j], order[i]];
+        saveOrder(order);
+        break;
+      }
+      case 'order-reset': saveOrder(CARD_DEFS.map((d) => d[0])); toast('最初の並びに戻しました'); break;
       case 'wake-now': saveObs({ wake_time: nowHm() }); break;
       case 'memo-new': sheet = { type: 'memo', date: el.dataset.date, text: '' }; renderOverlay(); break;
       case 'memo-save': memoSave(); break;
@@ -1168,15 +1230,31 @@
       return;
     }
     if (t.dataset && t.dataset.obs) { saveObs({ [t.dataset.obs]: t.value.trim() }); return; }
+    if (t.dataset && t.dataset.obsHm) {
+      const hm = parseHm(t.value);
+      if (hm === null) { toast('時刻は4桁の数字で入れてください(例: 0730)'); t.value = String(obsNow()[t.dataset.obsHm] || '').replace(':', ''); return; }
+      t.value = hm.replace(':', '');
+      saveObs({ [t.dataset.obsHm]: hm });
+    }
   });
   // シートの入力中の文字を覚えておく(描き直しても消えないように)
   document.addEventListener('input', (e) => {
     if (!sheet) return;
     const t = e.target;
     if (t.id === 'memo-text') sheet.text = t.value;
-    if (t.id === 'med-time') sheet.time = t.value;
+    if (t.id === 'med-time') { sheet.time = t.value; const v = document.getElementById('med-time-view'); if (v) v.textContent = hmView(t.value); }
     if (t.id === 'react-label') { sheet.label = t.value; const b = document.querySelector('.react-preview b'); if (b) b.textContent = t.value || '…'; }
     if (t.id === 'react-emoji') sheet.emoji = t.value;
+  });
+
+  // 時刻の欄を押したら中身を全部選ぶ(そのまま 4 桁を打てば入れ替わる)。時刻のシートでは Enter で記録
+  document.addEventListener('focusin', (e) => {
+    const t = e.target;
+    if (t && t.classList && t.classList.contains('hm')) setTimeout(() => { try { t.setSelectionRange(0, t.value.length); } catch (err) { /* 無視 */ } }, 0);
+  });
+  document.addEventListener('keydown', (e) => {
+    if (e.key === 'Enter' && e.target && e.target.id === 'med-time') { e.preventDefault(); medTimeSave(); }
+    else if (e.key === 'Enter' && e.target && e.target.dataset && e.target.dataset.obsHm) e.target.blur();
   });
 
   document.addEventListener('submit', (e) => {

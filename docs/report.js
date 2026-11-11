@@ -29,6 +29,7 @@
   const MOVE = { 1: 'ほぼなし', 2: '少し', 3: '中くらい', 4: '強い', 5: 'とても強い' };
   const EASY = [['morning', '朝'], ['noon', '昼'], ['evening', '夕方'], ['night', '夜']];
   const COMPLAINT = [['pain', '痛み'], ['dizzy', 'ぐるぐる'], ['other', 'その他']];
+  const ACT_SYM = [['work', '出'], ['overtime', '残'], ['lesson', '習'], ['ballet', 'バ']];
   const MED_SYM = { all: '●', yes: '●', noc: '◐', part: '◔', no: '○' };
   // "all 08:10" → { st: 'all', t: '08:10' }。前の版の朝の "yes" は「全部飲んだ」として読む
   const parseMed = (v, morning) => { const [st0, t] = String(v || '').split(' '); return { st: morning && st0 === 'yes' ? 'all' : (st0 || ''), t: t || '' }; };
@@ -105,6 +106,7 @@
     };
     const prnTotal = days.reduce((a, d) => a + (d.o ? Math.max(d.o.prn || 0, prnList(d.o).length) : 0), 0);
     const snackDays = days.filter((d) => d.o && d.o.night_snack === 1).length;
+    const actDays = (k) => days.filter((d) => d.o && setOf(d.o.activity).has(k)).length;
     const alcoholDays = days.filter((d) => d.o && d.o.alcohol === 1).length;
     const alcoholKnown = days.filter((d) => d.o && d.o.alcohol != null).length;
     const countSet = (key, list) => list.map(([k, l]) => `${l} ${days.filter((d) => d.o && setOf(d.o[key]).has(k)).length}日`).join(' / ');
@@ -120,6 +122,7 @@
       <tr><th>歩き方のふらつき</th><td>${dist('gait')}</td></tr>
       <tr><th>横になっていた時間</th><td>${dist('lying')}</td></tr>
       <tr><th>外出</th><td>${dist('outing')}</td></tr>
+      <tr><th>仕事・習い事</th><td>会社出勤 ${actDays('work')}日 <small>(うち残業 ${actDays('overtime')}日)</small> / 習い事 ${actDays('lesson')}日 / バレエ ${actDays('ballet')}日</td></tr>
       <tr><th>食事の量</th><td>${dist('meal')}<br><small>寝る前の間食 ${snackDays}日</small></td></tr>
       <tr><th>起きてきた時刻</th><td>${wakeText}</td></tr>
       <tr><th>睡眠(Apple Watch)</th><td>平均 ${hm(avg(sleep))} <small>/ 5分以上の目覚め 平均 ${f1(avg(awak))}回${naps.length ? ` / 昼寝など ${naps.length}日(平均 ${Math.round(avg(naps))}分)` : ''}(データ ${sleep.length}日)</small></td></tr>
@@ -155,11 +158,11 @@
     const cell = (key, d) => (d.o && d.o[key] != null ? SC[key].sym[d.o[key]] : '');
     const medCell = (f, d) => { const m = parseMed(d.o && d.o[f], f === 'med_morning'); return m.st ? `${MED_SYM[m.st] || ''}${m.t ? `<small>${m.t}</small>` : ''}` : ''; };
     const prnCell = (d) => { if (!d.o) return ''; const t = prnList(d.o); return t.length ? `${t.length}<small>${t.join(' ')}</small>` : (d.o.prn ? d.o.prn : ''); };
-    const table = `<table class="days"><thead><tr><th>日付</th><th>起床</th><th class="c">起上</th><th class="c">ふら</th><th class="c">横</th><th class="c">外出</th><th class="c">食事</th><th class="c">見た目</th>
+    const table = `<table class="days"><thead><tr><th>日付</th><th>起床</th><th class="c">起上</th><th class="c">ふら</th><th class="c">横</th><th class="c">外出</th><th class="c">仕事等</th><th class="c">食事</th><th class="c">見た目</th>
       ${MEDS.map(([, l]) => `<th class="c med">${esc(l)}</th>`).join('')}<th class="num">頓服</th><th class="c med">アルコール</th><th class="num">睡眠</th><th class="num">目覚</th><th class="num">歩数</th></tr></thead><tbody>
       ${days.map((d) => `<tr><td>${md(d.date)} <span style="color:var(--muted)">${DOW[dowOf(d.date)]}</span></td>
         <td>${d.o && d.o.wake_time ? d.o.wake_time : ''}</td>
-        <td class="c">${cell('getup', d)}</td><td class="c">${cell('gait', d)}</td><td class="c">${cell('lying', d)}</td><td class="c">${cell('outing', d)}</td><td class="c">${cell('meal', d)}${d.o && d.o.night_snack === 1 ? '<small>+間</small>' : ''}</td>
+        <td class="c">${cell('getup', d)}</td><td class="c">${cell('gait', d)}</td><td class="c">${cell('lying', d)}</td><td class="c">${cell('outing', d)}</td><td class="c">${d.o ? ACT_SYM.filter(([k]) => setOf(d.o.activity).has(k)).map((x) => x[1]).join('') : ''}</td><td class="c">${cell('meal', d)}${d.o && d.o.night_snack === 1 ? '<small>+間</small>' : ''}</td>
         <td class="c">${d.o && d.o.movement != null ? d.o.movement : ''}</td>
         ${MEDS.map(([f]) => `<td class="c">${medCell(f, d)}</td>`).join('')}
         <td class="num">${prnCell(d)}</td><td class="c">${d.o && d.o.alcohol === 1 ? 'あり' : ''}</td>
@@ -167,7 +170,7 @@
         <td class="num">${d.health && d.health.awakenings != null ? d.health.awakenings : ''}</td>
         <td class="num">${d.health && d.health.steps != null ? Number(d.health.steps).toLocaleString() : ''}</td></tr>`).join('')}
     </tbody></table>
-    <p class="leg">起上・ふら(ふらつき): ○ スムーズ/なし △ ゆっくり/少し × つらそう/目立つ ／ 横 = 横になっていた時間 ／ 外出: 外 外出できた 近 近所だけ – なし ／ 食事: 普 ふつう 半 半分くらい 少 少し × ほぼ食べず(+間 = 寝る前の間食あり) ／ 見た目 = 不随意運動 1〜5 ／ 朝の薬: ● ${esc(mn)}全部 ◔ ${esc(mn)}一部 ◐ ${esc(mn)}以外 ／ 寝る前の薬: ● 飲んだ ◔ 一部 ○ 飲まなかった(空欄は記録なし。小さな数字は飲んだ時刻) ／ 目覚 = 5分以上目が覚めた回数</p>`;
+    <p class="leg">起上・ふら(ふらつき): ○ スムーズ/なし △ ゆっくり/少し × つらそう/目立つ ／ 横 = 横になっていた時間 ／ 外出: 外 外出できた 近 近所だけ – なし ／ 仕事等: 出 会社出勤 残 残業 習 習い事 バ バレエ ／ 食事: 普 ふつう 半 半分くらい 少 少し × ほぼ食べず(+間 = 寝る前の間食あり) ／ 見た目 = 不随意運動 1〜5 ／ 朝の薬: ● ${esc(mn)}全部 ◔ ${esc(mn)}一部 ◐ ${esc(mn)}以外 ／ 寝る前の薬: ● 飲んだ ◔ 一部 ○ 飲まなかった(空欄は記録なし。小さな数字は飲んだ時刻) ／ 目覚 = 5分以上目が覚めた回数</p>`;
 
     page.innerHTML = header + note + summary +
       `<h2>日ごとの推移</h2><div class="avoid">${chart1}</div><div class="avoid" style="margin-top:8px">${chart2}</div><div class="avoid" style="margin-top:8px">${chart3}</div>` +

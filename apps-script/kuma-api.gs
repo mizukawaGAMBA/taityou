@@ -268,7 +268,7 @@ function toCell(v) {
  * 日付は「論理日」(午前4時区切り)の "YYYY-MM-DD" 文字列。時刻は "HH:MM"。
  * ===================================================================== */
 var Core = (function () {
-  var VERSION = 4;
+  var VERSION = 5;
   var IMAGE_PARTS = 10;       // 1 枚の画像を最大 10 個のセルに分けて入れる
   var IMAGE_CHUNK = 40000;    // 1 セルに入れる文字数(セルの上限は 50,000 文字)
   var IMAGE_META_COLS = 7;    // 画像の表の、データ以外の列の数
@@ -282,7 +282,9 @@ var Core = (function () {
                    'med_morning', 'med_extra', 'med_night', 'prn', 'alcohol',
                    'easy_times', 'good_note', 'complaint', 'complaint_note', 'recorded_by', 'updated_at',
                    // v4 で右に足した列(カテゴリーごとの備考、寝る前の間食、頓服の時刻)
-                   'note_morning', 'note_day', 'note_meds', 'note_alcohol', 'night_snack', 'prn_times'],
+                   'note_morning', 'note_day', 'note_meds', 'note_alcohol', 'night_snack', 'prn_times',
+                   // v5: 仕事・習い事(会社出勤、残業、習い事、バレエ)
+                   'activity'],
     // iPhone / Apple Watch から自動で届く値(1 日 1 行)。列は右に足していく(前の版のシートとそろえるため)
     health_daily: ['date', 'sleep_min', 'inbed_min', 'awakenings', 'deep_min', 'rem_min', 'bed_start', 'bed_end',
                    'steps', 'steadiness', 'resting_hr', 'hrv', 'move_score', 'source', 'updated_at', 'nap_min', 'walking_speed'],
@@ -299,6 +301,7 @@ var Core = (function () {
     next_appointment: '',
     last_appointment: '',
     report_note: '',                       // レポートの最初に印刷する、家族から先生へのひとこと
+    card_order: '',                        // 記録画面のカテゴリーの並び順(カンマ区切り。空なら最初の並び)
     health_shortcut_url: '',               // サポーターが作って共有したショートカットの iCloud リンク
     health_shortcut_name: 'くまヘルス送信', // そのショートカットの名前(アプリから試しに実行するのに使う)
     health_consent: '0',                   // 本人の同意(1 = 同意している)。同意できるのは本人の端末だけ
@@ -318,7 +321,8 @@ var Core = (function () {
 
   // 観察の項目。数字の範囲は [最小, 最大]
   var OBS_SCALES = { getup: [0, 2], gait: [0, 2], lying: [0, 3], outing: [0, 2], meal: [0, 3], movement: [1, 5], alcohol: [0, 1], night_snack: [0, 1] };
-  var OBS_SETS = { easy_times: ['morning', 'noon', 'evening', 'night'], complaint: ['pain', 'dizzy', 'other'] };
+  var OBS_SETS = { easy_times: ['morning', 'noon', 'evening', 'night'], complaint: ['pain', 'dizzy', 'other'],
+    activity: ['work', 'overtime', 'lesson', 'ballet'] };
   // 備考: good_note = 楽そうだった時間・できたこと、complaint_note = 見た目と本人のことば、ほかはカテゴリーの名前どおり
   var OBS_TEXTS = { good_note: 500, complaint_note: 500, note_morning: 500, note_day: 500, note_meds: 500, note_alcohol: 500 };
   var MED_FIELDS = ['med_morning', 'med_extra', 'med_night'];
@@ -386,7 +390,7 @@ var Core = (function () {
     return o;
   }
   function hasObs(o) {
-    if (o.wake_time || o.complaint || o.easy_times || o.prn_times || o.prn !== null) return true;
+    if (o.wake_time || o.complaint || o.easy_times || o.activity || o.prn_times || o.prn !== null) return true;
     for (var t in OBS_TEXTS) if (o[t]) return true;
     for (var k in OBS_SCALES) if (o[k] !== null) return true;
     for (var i = 0; i < MED_FIELDS.length; i++) if (o[MED_FIELDS[i]]) return true;
@@ -688,6 +692,7 @@ var Core = (function () {
     for (var sk in OBS_SETS) {
       if (!(sk in req)) continue;
       var vals = (Array.isArray(req[sk]) ? req[sk] : toStr(req[sk]).split(',')).map(function (v) { return toStr(v).trim(); });
+      if (sk === 'activity' && vals.indexOf('overtime') >= 0 && vals.indexOf('work') < 0) vals.push('work'); // 残業は出勤した日だけ
       set(sk, OBS_SETS[sk].filter(function (a) { return vals.indexOf(a) >= 0; }).join(',')); // 決まった順に並べる
     }
     for (var tk in OBS_TEXTS) if (tk in req) set(tk, toStr(req[tk]).trim().slice(0, OBS_TEXTS[tk]));
