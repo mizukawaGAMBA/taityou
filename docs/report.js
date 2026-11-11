@@ -29,8 +29,12 @@
   const MOVE = { 1: 'ほぼなし', 2: '少し', 3: '中くらい', 4: '強い', 5: 'とても強い' };
   const EASY = [['morning', '朝'], ['noon', '昼'], ['evening', '夕方'], ['night', '夜']];
   const COMPLAINT = [['pain', '痛み'], ['dizzy', 'ぐるぐる'], ['other', 'その他']];
-  const MED_SYM = { yes: '●', part: '◔', no: '○' };
-  const parseMed = (v) => { const [st, t] = String(v || '').split(' '); return { st: st || '', t: t || '' }; };
+  const MED_SYM = { all: '●', yes: '●', noc: '◐', part: '◔', no: '○' };
+  // "all 08:10" → { st: 'all', t: '08:10' }。前の版の朝の "yes" は「全部飲んだ」として読む
+  const parseMed = (v, morning) => { const [st0, t] = String(v || '').split(' '); return { st: morning && st0 === 'yes' ? 'all' : (st0 || ''), t: t || '' }; };
+  const prnList = (o) => String((o && o.prn_times) || '').split(',').filter(Boolean);
+  // カテゴリーごとの備考(記録の画面の並びと同じ)
+  const NOTES = [['note_morning', '朝'], ['note_day', '日中'], ['note_meds', '薬'], ['note_alcohol', 'アルコール']];
   const setOf = (v) => new Set(String(v || '').split(',').filter(Boolean));
 
   const page = document.getElementById('page');
@@ -67,7 +71,11 @@
     data.memos.forEach((m) => { if (m.date in idx) days[idx[m.date]].memos.push(m); });
 
     const s = data.settings || {};
-    const MEDS = [['med_morning', '朝の薬']].concat(s.med2_label ? [['med_extra', s.med2_label]] : []).concat([['med_night', '寝る前の薬']]);
+    const mn = String(s.med2_label || '').trim() || '別の薬';
+    const MEDS = [
+      ['med_morning', '朝の薬', [['all', `${mn}全部飲んだ`], ['part', `${mn}一部飲んだ`], ['noc', `${mn}以外飲んだ`]]],
+      ['med_night', '寝る前の薬', [['yes', '飲んだ'], ['part', '一部'], ['no', '飲まなかった']]]
+    ];
     const avg = (arr) => (arr.length ? (arr.reduce((a, b) => a + b, 0) / arr.length) : null);
     const f1 = (v) => (v == null ? '–' : (Math.round(v * 10) / 10).toFixed(1));
     const hm = (min) => (min == null ? '–' : `${Math.floor(min / 60)}時間${pad(Math.round(min % 60))}分`);
@@ -89,13 +97,14 @@
       if (!c.length) return '–';
       return def.order.map((v) => `${def.names[v]} ${c.filter((d) => d.o[key] === v).length}日`).join(' / ') + ` <small>(記録 ${c.length}日)</small>`;
     };
-    const medRow = ([f, label]) => {
-      const cnt = { yes: 0, part: 0, no: 0 };
-      days.forEach((d) => { const st = d.o ? parseMed(d.o[f]).st : ''; if (st in cnt) cnt[st]++; });
-      const none = n - cnt.yes - cnt.part - cnt.no;
-      return `${esc(label)}: 飲んだ ${cnt.yes}日 / 一部 ${cnt.part}日 / 飲まなかった ${cnt.no}日 <small>/ 記録なし ${none}日</small>`;
+    const medRow = ([f, label, states]) => {
+      const cnt = {}; states.forEach(([k]) => { cnt[k] = 0; });
+      days.forEach((d) => { const st = d.o ? parseMed(d.o[f], f === 'med_morning').st : ''; if (st in cnt) cnt[st]++; });
+      const none = n - Object.values(cnt).reduce((a, b) => a + b, 0);
+      return `${esc(label)}: ${states.map(([k, l]) => `${esc(l)} ${cnt[k]}日`).join(' / ')} <small>/ 記録なし ${none}日</small>`;
     };
-    const prnTotal = days.reduce((a, d) => a + (d.o && d.o.prn ? d.o.prn : 0), 0);
+    const prnTotal = days.reduce((a, d) => a + (d.o ? Math.max(d.o.prn || 0, prnList(d.o).length) : 0), 0);
+    const snackDays = days.filter((d) => d.o && d.o.night_snack === 1).length;
     const alcoholDays = days.filter((d) => d.o && d.o.alcohol === 1).length;
     const alcoholKnown = days.filter((d) => d.o && d.o.alcohol != null).length;
     const countSet = (key, list) => list.map(([k, l]) => `${l} ${days.filter((d) => d.o && setOf(d.o[key]).has(k)).length}日`).join(' / ');
@@ -111,12 +120,12 @@
       <tr><th>歩き方のふらつき</th><td>${dist('gait')}</td></tr>
       <tr><th>横になっていた時間</th><td>${dist('lying')}</td></tr>
       <tr><th>外出</th><td>${dist('outing')}</td></tr>
-      <tr><th>食事の量</th><td>${dist('meal')}</td></tr>
+      <tr><th>食事の量</th><td>${dist('meal')}<br><small>寝る前の間食 ${snackDays}日</small></td></tr>
       <tr><th>起きてきた時刻</th><td>${wakeText}</td></tr>
       <tr><th>睡眠(Apple Watch)</th><td>平均 ${hm(avg(sleep))} <small>/ 5分以上の目覚め 平均 ${f1(avg(awak))}回${naps.length ? ` / 昼寝など ${naps.length}日(平均 ${Math.round(avg(naps))}分)` : ''}(データ ${sleep.length}日)</small></td></tr>
       <tr><th>歩数(iPhone / Watch)</th><td>平均 ${steps.length ? Math.round(avg(steps)).toLocaleString() + '歩' : '–'} <small>(データ ${steps.length}日)</small></td></tr>
       <tr><th>服薬(家族の確認)</th><td>${MEDS.map(medRow).join('<br>')}<br><small>頓服 合計 ${prnTotal}回</small></td></tr>
-      <tr><th>飲酒</th><td>${alcoholDays}日 <small>(記録 ${alcoholKnown}日中)</small></td></tr>
+      <tr><th>アルコール</th><td>あり ${alcoholDays}日 <small>(記録 ${alcoholKnown}日中)</small></td></tr>
       <tr><th>本人が自分から訴えた日</th><td>${countSet('complaint', COMPLAINT)} <small>(こちらからはたずねていません)</small></td></tr>
       <tr><th>楽そうだった時間帯</th><td>${countSet('easy_times', EASY)}</td></tr>
     </table>`;
@@ -134,6 +143,8 @@
       const t = EASY.filter(([k]) => setOf(d.o.easy_times).has(k)).map((x) => x[1]).join('・');
       return `<li><b>${md(d.date)}</b> ${t ? `楽そう: ${t}` : ''}${t && d.o.good_note ? ' — ' : ''}${esc(d.o.good_note || '')}</li>`;
     });
+    const noteItems = days.filter((d) => d.o && NOTES.some(([k]) => d.o[k])).map((d) =>
+      `<li><b>${md(d.date)}</b> ${NOTES.filter(([k]) => d.o[k]).map(([k, l]) => `<span class="nl">${l}:</span> ${esc(d.o[k])}`).join(' ／ ')}</li>`);
     const complaintItems = days.filter((d) => d.o && (d.o.complaint || d.o.complaint_note)).map((d) => {
       const t = COMPLAINT.filter(([k]) => setOf(d.o.complaint).has(k)).map((x) => x[1]).join('・');
       return `<li><b>${md(d.date)}</b> ${t}${t && d.o.complaint_note ? ' — ' : ''}${esc(d.o.complaint_note || '')}</li>`;
@@ -142,25 +153,27 @@
     const memos = data.memos.length ? `<ul class="memos">${data.memos.map((m) => `<li><b>${md(m.date)} ${hhmm(m.ts)}</b> ${esc(m.text)}</li>`).join('')}</ul>` : '<p class="empty">なし</p>';
 
     const cell = (key, d) => (d.o && d.o[key] != null ? SC[key].sym[d.o[key]] : '');
-    const medCell = (f, d) => { const m = parseMed(d.o && d.o[f]); return m.st ? `${MED_SYM[m.st] || ''}${m.t ? `<small>${m.t}</small>` : ''}` : ''; };
+    const medCell = (f, d) => { const m = parseMed(d.o && d.o[f], f === 'med_morning'); return m.st ? `${MED_SYM[m.st] || ''}${m.t ? `<small>${m.t}</small>` : ''}` : ''; };
+    const prnCell = (d) => { if (!d.o) return ''; const t = prnList(d.o); return t.length ? `${t.length}<small>${t.join(' ')}</small>` : (d.o.prn ? d.o.prn : ''); };
     const table = `<table class="days"><thead><tr><th>日付</th><th>起床</th><th class="c">起上</th><th class="c">ふら</th><th class="c">横</th><th class="c">外出</th><th class="c">食事</th><th class="c">見た目</th>
-      ${MEDS.map(([, l]) => `<th class="c med">${esc(l)}</th>`).join('')}<th class="num">頓服</th><th class="c">酒</th><th class="num">睡眠</th><th class="num">目覚</th><th class="num">歩数</th></tr></thead><tbody>
+      ${MEDS.map(([, l]) => `<th class="c med">${esc(l)}</th>`).join('')}<th class="num">頓服</th><th class="c med">アルコール</th><th class="num">睡眠</th><th class="num">目覚</th><th class="num">歩数</th></tr></thead><tbody>
       ${days.map((d) => `<tr><td>${md(d.date)} <span style="color:var(--muted)">${DOW[dowOf(d.date)]}</span></td>
         <td>${d.o && d.o.wake_time ? d.o.wake_time : ''}</td>
-        <td class="c">${cell('getup', d)}</td><td class="c">${cell('gait', d)}</td><td class="c">${cell('lying', d)}</td><td class="c">${cell('outing', d)}</td><td class="c">${cell('meal', d)}</td>
+        <td class="c">${cell('getup', d)}</td><td class="c">${cell('gait', d)}</td><td class="c">${cell('lying', d)}</td><td class="c">${cell('outing', d)}</td><td class="c">${cell('meal', d)}${d.o && d.o.night_snack === 1 ? '<small>+間</small>' : ''}</td>
         <td class="c">${d.o && d.o.movement != null ? d.o.movement : ''}</td>
         ${MEDS.map(([f]) => `<td class="c">${medCell(f, d)}</td>`).join('')}
-        <td class="num">${d.o && d.o.prn ? d.o.prn : ''}</td><td class="c">${d.o && d.o.alcohol === 1 ? '酒' : ''}</td>
+        <td class="num">${prnCell(d)}</td><td class="c">${d.o && d.o.alcohol === 1 ? 'あり' : ''}</td>
         <td class="num">${d.health && d.health.sleep_min != null ? (d.health.sleep_min / 60).toFixed(1) : ''}</td>
         <td class="num">${d.health && d.health.awakenings != null ? d.health.awakenings : ''}</td>
         <td class="num">${d.health && d.health.steps != null ? Number(d.health.steps).toLocaleString() : ''}</td></tr>`).join('')}
     </tbody></table>
-    <p class="leg">起上・ふら(ふらつき): ○ スムーズ/なし △ ゆっくり/少し × つらそう/目立つ ／ 横 = 横になっていた時間 ／ 外出: 外 外出できた 近 近所だけ – なし ／ 食事: 普 ふつう 半 半分くらい 少 少し × ほぼ食べず ／ 見た目 = 不随意運動 1〜5 ／ 薬: ● 飲んだ ◔ 一部 ○ 飲まなかった(空欄は記録なし。数字は飲んだ時刻) ／ 目覚 = 5分以上目が覚めた回数</p>`;
+    <p class="leg">起上・ふら(ふらつき): ○ スムーズ/なし △ ゆっくり/少し × つらそう/目立つ ／ 横 = 横になっていた時間 ／ 外出: 外 外出できた 近 近所だけ – なし ／ 食事: 普 ふつう 半 半分くらい 少 少し × ほぼ食べず(+間 = 寝る前の間食あり) ／ 見た目 = 不随意運動 1〜5 ／ 朝の薬: ● ${esc(mn)}全部 ◔ ${esc(mn)}一部 ◐ ${esc(mn)}以外 ／ 寝る前の薬: ● 飲んだ ◔ 一部 ○ 飲まなかった(空欄は記録なし。小さな数字は飲んだ時刻) ／ 目覚 = 5分以上目が覚めた回数</p>`;
 
     page.innerHTML = header + note + summary +
       `<h2>日ごとの推移</h2><div class="avoid">${chart1}</div><div class="avoid" style="margin-top:8px">${chart2}</div><div class="avoid" style="margin-top:8px">${chart3}</div>` +
+      `<h2>見た目と本人のことば</h2><p class="src">「本人が自分から口にしたこと」(こちらからはたずねていません)と、その日の備考。</p>${list(complaintItems)}` +
       `<h2>楽そうだった時間・できたこと</h2>${list(goodItems)}` +
-      `<h2>本人が自分から口にしたこと</h2>${list(complaintItems)}` +
+      `<h2>家族の備考</h2>${list(noteItems)}` +
       `<h2>気になったこと(家族のメモ)</h2>${memos}` +
       `<h2>日別の一覧</h2>${table}`;
     attachTooltip('c1', days, [['見た目', (d) => (d.o && d.o.movement != null ? `${d.o.movement}(${MOVE[d.o.movement]})` : '–')]]);
@@ -179,14 +192,18 @@
   function ticksFor(max) { return [0, 0.25, 0.5, 0.75, 1].map((r) => Math.round(max * r * 100) / 100); }
   const tickLabel = (t) => (t >= 1000 ? t.toLocaleString() : String(t));
   function xOf(i, n) { return PL + (n === 1 ? (W - PL - PR) / 2 : (i * (W - PL - PR)) / (n - 1)); }
+  // 棒グラフは、端の棒が目盛りの数字に重ならないように、1 日ずつの枠の真ん中に置く
+  const xPoint = (i, n) => xOf(i, n);
+  function xBand(i, n) { return PL + ((i + 0.5) * (W - PL - PR)) / Math.max(n, 1); }
   function yOf(v, opt) { const min = opt.min || 0; return PT + (H - PT - PB) * (1 - (v - min) / (opt.max - min)); }
-  function xAxis(days) {
+  function xAxis(days, xf) {
+    xf = xf || xOf;
     const n = days.length; const step = n > 40 ? 7 : n > 20 ? 4 : n > 10 ? 2 : 1;
     let out = '';
     days.forEach((d, i) => {
       const isLast = i === n - 1;
       const regular = i % step === 0 && (n - 1 - i) >= Math.ceil(step / 2); // 最終日のラベルと重ならないように間引く
-      if (regular || isLast) out += `<text x="${xOf(i, n)}" y="${H - 8}" font-size="9" text-anchor="middle" fill="var(--muted)">${md(d.date)}</text>`;
+      if (regular || isLast) out += `<text x="${xf(i, n)}" y="${H - 8}" font-size="9" text-anchor="middle" fill="var(--muted)">${md(d.date)}</text>`;
     });
     return out;
   }
@@ -214,22 +231,23 @@
     const n = days.length;
     const slot = (W - PL - PR) / Math.max(n, 1);
     const bw = Math.min(24, Math.max(3, slot - 2)); // 棒と棒のあいだは 2px あける
-    let svg = grid(opt) + xAxis(days);
+    let svg = grid(opt) + xAxis(days, xBand);
     let lastIdx = -1;
     days.forEach((d, i) => {
       const v = srs.get(d);
       if (v == null) return;
-      const x = xOf(i, n) - bw / 2, y0 = yOf(0, opt), y = yOf(Math.min(v, opt.max), opt);
+      const x = xBand(i, n) - bw / 2, y0 = yOf(0, opt), y = yOf(Math.min(v, opt.max), opt);
       const h = Math.max(0, y0 - y);
       const r = Math.min(4, bw / 2, h);
       svg += `<path d="M${x} ${y0} V${y + r} Q${x} ${y} ${x + r} ${y} H${x + bw - r} Q${x + bw} ${y} ${x + bw} ${y + r} V${y0} Z" fill="var(--s1)"/>`;
       lastIdx = i;
     });
-    if (lastIdx >= 0) svg += `<text x="${xOf(lastIdx, n) + bw / 2 + 6}" y="${yOf(Math.min(srs.get(days[lastIdx]), opt.max), opt) + 3}" font-size="9.5" fill="var(--ink-2)">${srs.fmt(srs.get(days[lastIdx]))}</text>`;
-    return `${title(srs)}<div class="chart" id="${opt.id}"><svg viewBox="0 0 ${W} ${H}" role="img" aria-label="${esc(srs.label)}の日ごとの推移">${svg}<line class="xh" x1="0" x2="0" y1="${PT}" y2="${H - PB}" stroke="var(--axis)" stroke-width="1" style="display:none"/></svg><div class="tooltip"></div></div>`;
+    if (lastIdx >= 0) svg += `<text x="${xBand(lastIdx, n) + bw / 2 + 6}" y="${yOf(Math.min(srs.get(days[lastIdx]), opt.max), opt) + 3}" font-size="9.5" fill="var(--ink-2)">${srs.fmt(srs.get(days[lastIdx]))}</text>`;
+    return `${title(srs)}<div class="chart" id="${opt.id}" data-band="1"><svg viewBox="0 0 ${W} ${H}" role="img" aria-label="${esc(srs.label)}の日ごとの推移">${svg}<line class="xh" x1="0" x2="0" y1="${PT}" y2="${H - PB}" stroke="var(--axis)" stroke-width="1" style="display:none"/></svg><div class="tooltip"></div></div>`;
   }
   function attachTooltip(id, days, rows) {
     const box = document.getElementById(id); if (!box) return;
+    const xOf = box.dataset.band ? xBand : xPoint;
     const svg = box.querySelector('svg'); const tip = box.querySelector('.tooltip'); const xh = svg.querySelector('.xh');
     const n = days.length;
     svg.addEventListener('mousemove', (e) => {

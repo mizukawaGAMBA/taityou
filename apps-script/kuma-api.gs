@@ -268,7 +268,7 @@ function toCell(v) {
  * 日付は「論理日」(午前4時区切り)の "YYYY-MM-DD" 文字列。時刻は "HH:MM"。
  * ===================================================================== */
 var Core = (function () {
-  var VERSION = 3;
+  var VERSION = 4;
   var IMAGE_PARTS = 10;       // 1 枚の画像を最大 10 個のセルに分けて入れる
   var IMAGE_CHUNK = 40000;    // 1 セルに入れる文字数(セルの上限は 50,000 文字)
   var IMAGE_META_COLS = 7;    // 画像の表の、データ以外の列の数
@@ -280,7 +280,9 @@ var Core = (function () {
     // 家族の観察(1 日 1 行)。本人には何もたずねない
     observe:      ['date', 'wake_time', 'getup', 'gait', 'lying', 'outing', 'meal', 'movement',
                    'med_morning', 'med_extra', 'med_night', 'prn', 'alcohol',
-                   'easy_times', 'good_note', 'complaint', 'complaint_note', 'recorded_by', 'updated_at'],
+                   'easy_times', 'good_note', 'complaint', 'complaint_note', 'recorded_by', 'updated_at',
+                   // v4 で右に足した列(カテゴリーごとの備考、寝る前の間食、頓服の時刻)
+                   'note_morning', 'note_day', 'note_meds', 'note_alcohol', 'night_snack', 'prn_times'],
     // iPhone / Apple Watch から自動で届く値(1 日 1 行)。列は右に足していく(前の版のシートとそろえるため)
     health_daily: ['date', 'sleep_min', 'inbed_min', 'awakenings', 'deep_min', 'rem_min', 'bed_start', 'bed_end',
                    'steps', 'steadiness', 'resting_hr', 'hrv', 'move_score', 'source', 'updated_at', 'nap_min', 'walking_speed'],
@@ -315,12 +317,15 @@ var Core = (function () {
   var PATIENT_SETTINGS = ['supporter_name', 'health_shortcut_url', 'health_shortcut_name', 'health_consent', 'health_consent_at', 'health_last_at', 'image_config'];
 
   // 観察の項目。数字の範囲は [最小, 最大]
-  var OBS_SCALES = { getup: [0, 2], gait: [0, 2], lying: [0, 3], outing: [0, 2], meal: [0, 3], movement: [1, 5], alcohol: [0, 1] };
+  var OBS_SCALES = { getup: [0, 2], gait: [0, 2], lying: [0, 3], outing: [0, 2], meal: [0, 3], movement: [1, 5], alcohol: [0, 1], night_snack: [0, 1] };
   var OBS_SETS = { easy_times: ['morning', 'noon', 'evening', 'night'], complaint: ['pain', 'dizzy', 'other'] };
-  var OBS_TEXTS = { good_note: 500, complaint_note: 500 };
+  // 備考: good_note = 楽そうだった時間・できたこと、complaint_note = 見た目と本人のことば、ほかはカテゴリーの名前どおり
+  var OBS_TEXTS = { good_note: 500, complaint_note: 500, note_morning: 500, note_day: 500, note_meds: 500, note_alcohol: 500 };
   var MED_FIELDS = ['med_morning', 'med_extra', 'med_night'];
-  // 薬: "yes" 飲んだ / "part" 一部 / "no" 飲まなかった。時刻がわかれば "yes 08:10" のように後ろに付ける
-  var MED_RE = /^(?:(?:yes|part)(?: (?:[01]\d|2[0-3]):[0-5]\d)?|no)$/;
+  // 薬: 朝は "all" (分けて書く薬も)全部 / "part" 一部 / "noc" その薬以外を飲んだ。夜は "yes" 飲んだ / "part" 一部 / "no" 飲まなかった。
+  // 時刻は "all 08:10" のように後ろに付ける(v3 の朝の "yes" も読めるように残す)
+  var MED_RE = /^(?:(?:yes|all|part|noc)(?: (?:[01]\d|2[0-3]):[0-5]\d)?|no)$/;
+  var PRN_TIMES_RE = /^(?:(?:[01]\d|2[0-3]):[0-5]\d)(?:,(?:[01]\d|2[0-3]):[0-5]\d){0,19}$/;
   var SLOT_KEYS = ['title', 'loading', 'normal', 'sleepy', 'love', 'happy', 'role_patient', 'role_supporter'];
   var HEALTH_SCALARS = ['steadiness', 'resting_hr', 'hrv', 'move_score', 'walking_speed'];
   var HEALTH_TEXT = { steadiness: 1 };
@@ -373,6 +378,7 @@ var Core = (function () {
     for (var k in OBS_SCALES) o[k] = toInt(r[k]);
     MED_FIELDS.forEach(function (f) { o[f] = toStr(r[f]); });
     o.prn = toInt(r.prn);
+    o.prn_times = toStr(r.prn_times);
     for (var s in OBS_SETS) o[s] = toStr(r[s]);
     for (var t in OBS_TEXTS) o[t] = toStr(r[t]);
     o.recorded_by = toStr(r.recorded_by);
@@ -380,7 +386,8 @@ var Core = (function () {
     return o;
   }
   function hasObs(o) {
-    if (o.wake_time || o.good_note || o.complaint || o.complaint_note || o.easy_times || o.prn !== null) return true;
+    if (o.wake_time || o.complaint || o.easy_times || o.prn_times || o.prn !== null) return true;
+    for (var t in OBS_TEXTS) if (o[t]) return true;
     for (var k in OBS_SCALES) if (o[k] !== null) return true;
     for (var i = 0; i < MED_FIELDS.length; i++) if (o[MED_FIELDS[i]]) return true;
     return false;
@@ -667,7 +674,13 @@ var Core = (function () {
       if (v && !MED_RE.test(v)) throw fail('bad_request', '薬の記録の形が正しくありません');
       set(f, v);
     });
-    if ('prn' in req) {
+    if ('prn_times' in req) {
+      // 頓服を飲んだ時刻の一覧("13:20,18:05")。回数は時刻の数
+      var pt = (Array.isArray(req.prn_times) ? req.prn_times.join(',') : toStr(req.prn_times)).replace(/\s/g, '');
+      if (pt && !PRN_TIMES_RE.test(pt)) throw fail('bad_request', '頓服の時刻の形が正しくありません');
+      set('prn_times', pt);
+      set('prn', pt ? pt.split(',').length : null);
+    } else if ('prn' in req) {
       var p = toInt(req.prn);
       if (p !== null && (p < 0 || p > 20)) throw fail('bad_request', '頓服の回数が範囲の外です');
       set('prn', p);

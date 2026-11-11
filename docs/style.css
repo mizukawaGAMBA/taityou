@@ -291,6 +291,16 @@ canvas.confetti { position: fixed; inset: 0; pointer-events: none; z-index: 55; 
 .inline-time { display: flex; align-items: center; gap: 10px; margin-top: 8px; font-size: 0.85rem; color: var(--ink-2); }
 .inline-time input { max-width: 150px; min-height: 44px; }
 .progress-line { color: var(--ink-2); margin: -4px 0 12px; text-align: center; }
+/* 薬のボタン: 長押しで時刻を入れるので、iPhone の長押しメニューや文字選択を出さない */
+.chip-btn.med { -webkit-touch-callout: none; -webkit-user-select: none; user-select: none; touch-action: manipulation; }
+.chip-btn.med small { display: block; font-size: 0.8rem; font-weight: 600; color: var(--ink-2); line-height: 1.2; }
+.chip-btn.snack { border-style: dashed; }
+.chip-btn.snack.sel { border-style: solid; }
+.pill .pill-x { margin-left: 4px; min-width: 28px; min-height: 28px; border-radius: 50%; color: var(--ink-2); font-size: 1rem; }
+/* カテゴリーごとの備考 */
+.field.note-field { margin: 10px 0 0; }
+.field.note-field span { font-size: 0.85rem; }
+textarea.note { min-height: 64px; font-size: 1rem; }
 
 /* ---------- 本人の画面(くまの部屋) ---------- */
 .card.room { display: flex; flex-direction: column; align-items: center; gap: 18px; padding: 26px 18px 22px; text-align: center; }

@@ -61,18 +61,26 @@
     outing:   { label: '外出', opts: [[2, '外出できた'], [1, '近所だけ'], [0, 'なし']] },
     meal:     { label: '食事の量', opts: [[3, 'ふつう'], [2, '半分くらい'], [1, '少し'], [0, 'ほぼ食べず']] },
     movement: { label: '不随意運動の見た目', opts: [[1, 'ほぼなし'], [2, '少し'], [3, '中くらい'], [4, '強い'], [5, 'とても強い']] },
-    alcohol:  { label: 'お酒', opts: [[0, 'なし'], [1, 'あり']] }
+    alcohol:  { label: 'アルコール', opts: [[0, 'なし'], [1, 'あり']] }
   };
   const EASY = [['morning', '朝'], ['noon', '昼'], ['evening', '夕方'], ['night', '夜']];
   const COMPLAINT = [['pain', '痛み'], ['dizzy', 'ぐるぐる'], ['other', 'その他']];
-  const MED_STATE = [['yes', '飲んだ'], ['part', '一部'], ['no', '飲まなかった']];
-  function medKinds(s) {
-    const list = [['med_morning', '朝の薬']];
-    if (s.med2_label) list.push(['med_extra', s.med2_label]);
-    list.push(['med_night', '寝る前の薬']);
-    return list;
+  // 朝の薬のボタンには、設定の「朝の薬で分けて書く薬の名前」を出す(名前はスプレッドシートにだけ保存し、プログラムには書かない)
+  const medName = (s) => String(s.med2_label || '').trim() || '別の薬';
+  function medRows(s) {
+    const n = medName(s);
+    return [
+      ['med_morning', '朝の薬', [['all', `${n}全部飲んだ`], ['part', `${n}一部飲んだ`], ['noc', `${n}以外飲んだ`]]],
+      ['med_night', '寝る前の薬', [['yes', '飲んだ'], ['part', '一部'], ['no', '飲まなかった']]]
+    ];
   }
-  const parseMed = (v) => { const [st, t] = String(v || '').split(' '); return { st: st || '', t: t || '' }; };
+  // "all 08:10" → { st: 'all', t: '08:10' }。前の版の朝の "yes" は「全部飲んだ」として読む
+  const parseMed = (v, morning) => {
+    const [st0, t] = String(v || '').split(' ');
+    return { st: morning && st0 === 'yes' ? 'all' : (st0 || ''), t: t || '' };
+  };
+  const hmKey = (t) => { const [h, m] = t.split(':').map(Number); return (h < 4 ? h + 24 : h) * 60 + m; }; // 深夜は前の日の続き
+  const prnList = (o) => String((o && o.prn_times) || '').split(',').filter(Boolean);
 
   /* ========== 画像とリアクション ==========
    * もとの設定は docs/images/images.js(window.KUMA_IMAGES)。サイトの「くま」タブで選んだ画像と
@@ -466,12 +474,14 @@
     return topbar('くまの記録', right) + tabs + body;
   }
 
-  function scaleField(key, o) {
+  function scaleField(key, o, extra, noLabel) {
     const def = SCALES[key];
     const cur = o[key] == null ? null : Number(o[key]);
-    return `<div class="obs-field"><div class="obs-label">${def.label}</div><div class="chips">${def.opts.map(([v, l]) =>
-      `<button class="chip-btn ${cur === v ? 'sel' : ''}" data-act="obs" data-f="${key}" data-v="${v}" aria-pressed="${cur === v}">${l}</button>`).join('')}</div></div>`;
+    return `<div class="obs-field">${noLabel ? '' : `<div class="obs-label">${def.label}</div>`}<div class="chips">${def.opts.map(([v, l]) =>
+      `<button class="chip-btn ${cur === v ? 'sel' : ''}" data-act="obs" data-f="${key}" data-v="${v}" aria-pressed="${cur === v}">${l}</button>`).join('')}${extra || ''}</div></div>`;
   }
+  // カテゴリーごとの備考欄(入力し終わって欄から離れた時に保存)
+  const noteField = (o, key, ph) => `<label class="field note-field"><span>備考</span><textarea class="note" data-obs="${key}" maxlength="500" rows="2" placeholder="${esc(ph)}">${esc(o[key] || '')}</textarea></label>`;
   function setChips(key, opts, cur) {
     const sel = new Set(String(cur || '').split(',').filter(Boolean));
     return `<div class="chips">${opts.map(([v, l]) =>
@@ -495,27 +505,36 @@
     const wake = `<div class="obs-field"><div class="obs-label">起きてきた時刻</div><div class="row">
         <input type="time" data-obs="wake_time" value="${esc(o.wake_time || '')}" style="max-width:160px">
         ${curDate === today ? '<button class="btn outline" style="width:auto;min-height:52px" data-act="wake-now">いま</button>' : ''}</div></div>`;
-    const prn = Number(o.prn || 0);
-    const meds = medKinds(s).map(([f, label]) => {
-      const m = parseMed(o[f]);
-      const chips = MED_STATE.map(([k, l]) => `<button class="chip-btn ${m.st === k ? 'sel' : ''}" data-act="med" data-f="${f}" data-v="${k}" aria-pressed="${m.st === k}">${l}</button>`).join('');
-      const time = m.st === 'yes' || m.st === 'part'
-        ? `<label class="inline-time"><span>時刻(わかれば)</span><input type="time" data-med-time="${f}" value="${esc(m.t)}"></label>` : '';
-      return `<div class="obs-field"><div class="obs-label">${esc(label)}</div><div class="chips">${chips}</div>${time}</div>`;
-    }).join('') + `<div class="obs-field"><div class="obs-label">頓服(必要な時の薬)</div><div class="stepper">
-        <button class="chip-btn" data-act="prn" data-d="-1" aria-label="1回へらす" ${prn <= 0 ? 'disabled' : ''}>−</button><b>${o.prn == null ? '–' : prn + '回'}</b><button class="chip-btn" data-act="prn" data-d="1" aria-label="1回ふやす">＋</button></div></div>`;
+    const isToday = curDate === today;
+    const medBtn = (f, k, label, title, m) => {
+      const sel = m.st === k;
+      return `<button class="chip-btn med ${sel ? 'sel' : ''}" data-act="med" ${k === 'no' ? '' : 'data-lp="med"'} data-f="${f}" data-v="${k}" data-label="${esc(title + ': ' + label)}" aria-pressed="${sel}">${esc(label)}${sel && m.t ? `<small>${m.t}</small>` : ''}</button>`;
+    };
+    const meds = medRows(s).map(([f, title, states]) => {
+      const m = parseMed(o[f], f === 'med_morning');
+      return `<div class="obs-field"><div class="obs-label">${title}</div><div class="chips">${states.map(([k, l]) => medBtn(f, k, l, title, m)).join('')}</div></div>`;
+    }).join('');
+    const times = prnList(o);
+    const prn = `<div class="obs-field"><div class="obs-label">頓服(必要な時の薬)</div><div class="chips">
+        <button class="chip-btn med" data-act="prn-add" data-lp="prn" data-label="頓服を飲んだ">頓服を飲んだ</button>
+        ${times.map((t, i) => `<span class="pill">${t}<button class="pill-x" data-act="prn-del" data-i="${i}" aria-label="${t} の頓服を取り消す">×</button></span>`).join('')}
+        ${!times.length && o.prn ? `<span class="pill">${o.prn}回(時刻なし)</span>` : ''}</div></div>`;
+    const medHelp = `<p class="help">${isToday ? '押すと今の時刻で記録します。<b>長押し</b>すると時刻を入れられます。' : '前の日の分は、押すと時刻を入れる欄が開きます。'}もう一度押すと取り消せます。${s.med2_label ? '' : '<br>「設定」タブの「朝の薬で分けて書く薬の名前」を入れると、ボタンにその名前が出ます。'}</p>`;
+    const snack = `<button class="chip-btn snack ${o.night_snack === 1 ? 'sel' : ''}" data-act="obs" data-f="night_snack" data-v="1" aria-pressed="${o.night_snack === 1}">寝る前の間食</button>`;
     return nav + progress + sleepCard(data.health, s) +
-      card('朝のようす', wake + scaleField('getup', o)) +
-      card('日中のようす', scaleField('gait', o) + scaleField('lying', o) + scaleField('outing', o) + scaleField('meal', o)) +
-      card('見た目のようす', scaleField('movement', o) + '<p class="help">あなたの目で見た印象で大丈夫です。いちばん目立った時で。</p>') +
-      card('おくすり', meds) +
-      card('お酒', scaleField('alcohol', o).replace('<div class="obs-label">お酒</div>', '')) +
-      card('楽そうだった時間・できたこと', `<div class="obs-label">楽そうだった時間帯</div>${setChips('easy_times', EASY, o.easy_times)}
-        <label class="field" style="margin-top:12px"><span>楽しめたこと・できたこと</span><textarea data-obs="good_note" maxlength="500" placeholder="例: ドラマを見て笑っていた / 一緒に買い物に行けた">${esc(o.good_note || '')}</textarea></label>
-        <p class="help">本人には聞かずに、見ていて気づいたことや、本人が自分から話したことだけ。</p>`) +
-      card('本人が自分から口にしたこと', `${setChips('complaint', COMPLAINT, o.complaint)}
-        <label class="field" style="margin-top:12px"><span>ひとこと(任意)</span><input type="text" data-obs="complaint_note" maxlength="500" value="${esc(o.complaint_note || '')}" placeholder="例: 夕方に「足が痛い」と言った"></label>
-        <p class="help">こちらからは聞きません。本人が自分から言った日だけ押します。</p>`) +
+      card('朝のようす', wake + scaleField('getup', o) + noteField(o, 'note_morning', '例: 起きてすぐはふらついていた')) +
+      card('日中のようす', scaleField('gait', o) + scaleField('lying', o) + scaleField('outing', o) + scaleField('meal', o, snack) +
+        noteField(o, 'note_day', '例: 昼過ぎに2時間ほど横になっていた')) +
+      card('見た目のようす・本人のことば', scaleField('movement', o) +
+        '<p class="help" style="margin:-8px 0 14px">あなたの目で見た印象で大丈夫です。いちばん目立った時で。</p>' +
+        `<div class="obs-field"><div class="obs-label">本人が自分から口にしたこと</div>${setChips('complaint', COMPLAINT, o.complaint)}
+          <p class="help">こちらからは聞きません。本人が自分から言った時だけ押します。</p></div>` +
+        noteField(o, 'complaint_note', '例: 口の動きが目立った / 夕方に「足が痛い」と言った')) +
+      card('楽そうだった時間・できたこと', `<div class="obs-field"><div class="obs-label">楽そうだった時間帯</div>${setChips('easy_times', EASY, o.easy_times)}</div>` +
+        noteField(o, 'good_note', '例: ドラマを見て笑っていた / 一緒に買い物に行けた') +
+        '<p class="help">本人には聞かずに、見ていて気づいたことや、本人が自分から話したことだけ。</p>') +
+      card('おくすり', meds + prn + medHelp + noteField(o, 'note_meds', '例: 寝る前の薬を飲むのが遅くなった')) +
+      card('アルコール', scaleField('alcohol', o, '', true) + noteField(o, 'note_alcohol', '例: 夕食でビールをコップ1杯')) +
       memoCard(data, curDate) +
       `<p class="help center" style="margin:4px 0 20px">押した内容はその場で保存されます。</p>`;
   }
@@ -551,7 +570,7 @@
   /* ---- 一覧 ---- */
   const SYM3 = ['○', '△', '×'];
   const OUT_SYM = ['–', '近', '外'];
-  const MED_SYM = { yes: '●', part: '◔', no: '○', '': '–' };
+  const MED_SYM = { all: '●', yes: '●', noc: '◐', part: '◔', no: '○', '': '–' };
   function viewList() {
     if (!listData) { loadList(); return `<div class="card center muted">読み込んでいます…</div>`; }
     const byDate = {};
@@ -563,7 +582,7 @@
     const rows = Object.values(byDate).map((r) => {
       const o = r.obs || {};
       const sl = r.health && r.health.sleep_min != null ? `${(r.health.sleep_min / 60).toFixed(1)}h` : '';
-      const med = (f) => MED_SYM[parseMed(o[f]).st] || '–';
+      const med = (f) => MED_SYM[parseMed(o[f], f === 'med_morning').st] || '–';
       return `<tr class="clickable" data-act="goto-date" data-date="${r.date}">
         <td>${jpShort(r.date)}<span class="muted small"> ${DOW[dowOf(r.date)]}</span></td>
         <td class="num">${o.movement != null ? o.movement : dash}</td>
@@ -577,7 +596,7 @@
     const from = s.last_appointment || addDays(listData.to, -41);
     return `<section class="card"><h2>直近14日 <span class="link">タップで開く</span></h2>
       <table class="list"><thead><tr><th>日付</th><th>見た目</th><th>起上</th><th>ふらつき</th><th>外出</th><th>薬 朝/夜</th><th>睡眠</th></tr></thead><tbody>${rows}</tbody></table>
-      <p class="help">見た目 = 不随意運動 1〜5 / 起上・ふらつき: ○ なし・スムーズ △ 少し × 目立つ・つらそう / 外出: 外 外出 近 近所 / 薬: ● 飲んだ ◔ 一部 ○ 飲まなかった</p></section>
+      <p class="help">見た目 = 不随意運動 1〜5 / 起上・ふらつき: ○ なし・スムーズ △ 少し × 目立つ・つらそう / 外出: 外 外出 近 近所 / 薬: ● 全部・飲んだ ◐ ${esc(medName(listData.settings || {}))}以外 ◔ 一部 ○ 飲まなかった</p></section>
       <section class="card"><h2>医師に見せるレポート</h2>
         <p class="small" style="margin-bottom:10px">PC のブラウザで開き、印刷 →「PDF に保存」。期間はレポート画面でも変えられます。</p>
         <a class="btn primary" href="report.html?from=${from}&to=${listData.to}" target="_blank" rel="noopener">レポートを開く(${jpShort(from)}〜${jpShort(listData.to)})</a></section>`;
@@ -620,7 +639,7 @@
       <h2>設定</h2>
       ${f('patient_name', '本人の名前', 'text', 'レポートに印字します(空欄でも可)')}
       ${f('supporter_name', '記録する人の名前', 'text', '本人の同意の画面に「届く先: ○○さん」と出ます')}
-      ${f('med2_label', '3つ目の薬の名前(任意)', 'text', '空欄なら「朝の薬」「寝る前の薬」の2つだけを記録します')}
+      ${f('med2_label', '朝の薬で分けて書く薬の名前', 'text', '朝の薬のボタン(「○○全部飲んだ」「○○一部飲んだ」「○○以外飲んだ」)の○○に出ます。名前はスプレッドシートにだけ保存され、GitHub には出ません', '例: お薬の名前')}
       <div class="row"><div style="flex:1">${f('last_appointment', '前回の診察日', 'date')}</div><div style="flex:1">${f('next_appointment', '次の診察日', 'date')}</div></div>
       <label class="field"><span>先生に伝えたいこと</span><textarea name="report_note" maxlength="2000" placeholder="例: 本人に症状を尋ねると痛みが強くなるため、家族の観察で記録しています。">${esc(s.report_note || '')}</textarea><div class="help">レポートのいちばん上に印刷されます。</div></label>
       <button type="submit" class="btn primary" style="margin-top:4px">設定を保存</button>
@@ -785,10 +804,41 @@
       <p class="help">消すと、使っていた場所は内蔵のくま(ひとことは ♡)に戻ります。</p>`);
   }
 
+  // 薬を飲んだ時刻を入れる(長押し・前の日・「時刻を変える」から)
+  function openMedTime(f, v, label, replace) {
+    let time = nowHm();
+    if (f === 'prn') { if (replace) time = replace; }
+    else { const m = parseMed(obsNow()[f], f === 'med_morning'); if (m.st === v && m.t) time = m.t; }
+    sheet = { type: 'medtime', f, v, label, time, replace: replace || null };
+    renderOverlay();
+  }
+  function medTimeSheetHTML() {
+    return wrapSheet(`<h3>${esc(sheet.label)}</h3>
+      <label class="field"><span>飲んだ時刻</span><input type="time" id="med-time" value="${esc(sheet.time)}"></label>
+      ${curDate !== logicalToday() ? `<p class="help">${jpDate(curDate)}の分として記録します。深夜 0〜3 時台の時刻は、その前の日の夜の分になります。</p>` : ''}
+      <div class="actions"><button class="btn primary" data-act="medtime-save">この時刻で記録</button><button class="btn ghost" data-act="sheet-close">やめる</button></div>`);
+  }
+  function medTimeSave() {
+    const t = String(sheet.time || '').slice(0, 5);
+    if (!/^\d{2}:\d{2}$/.test(t)) { toast('時刻を入れてください'); return; }
+    const { f, v, label, replace } = sheet;
+    sheet = null; renderOverlay();
+    if (f === 'prn') {
+      const list = prnList(obsNow());
+      if (replace) { const i = list.indexOf(replace); if (i >= 0) list.splice(i, 1); }
+      list.push(t); savePrn(list);
+    } else saveObs({ [f]: `${v} ${t}` });
+    toast(`${label} ${t} で記録しました`);
+  }
+  function savePrn(list) {
+    list.sort((a, b) => hmKey(a) - hmKey(b));
+    saveObs({ prn_times: list.join(','), prn: list.length || null });
+  }
+
   function renderOverlay() {
     const el = document.getElementById('overlay');
     if (!sheet) { el.innerHTML = ''; return; }
-    const map = { memo: memoSheetHTML, key: keySheetHTML, psettings: patientSettingsHTML, health: healthSheetHTML, slot: slotSheetHTML, react: reactSheetHTML, image: imageSheetHTML };
+    const map = { memo: memoSheetHTML, key: keySheetHTML, psettings: patientSettingsHTML, health: healthSheetHTML, slot: slotSheetHTML, react: reactSheetHTML, image: imageSheetHTML, medtime: medTimeSheetHTML };
     el.innerHTML = map[sheet.type] ? map[sheet.type]() : '';
     if (sheet && sheet.type === 'memo') { const ta = el.querySelector('textarea'); if (ta && !sheet.focused) { sheet.focused = true; setTimeout(() => ta.focus(), 50); } }
   }
@@ -973,7 +1023,27 @@
   document.addEventListener('focusout', () => { setTimeout(() => { if (pendingRender && !isEditing()) render(); }, 200); });
 
   /* ========== イベント ========== */
+  // 長押し(薬のボタン): 0.5 秒押し続けると時刻を入れる欄を開く。そのあとのクリックは無視する
+  let lpTimer = null, lpFired = false, lpPos = null;
+  const lpCancel = () => { clearTimeout(lpTimer); lpTimer = null; };
+  document.addEventListener('pointerdown', (e) => {
+    lpFired = false;
+    const el = e.target.closest && e.target.closest('[data-lp]');
+    if (!el) return;
+    lpPos = [e.clientX, e.clientY]; lpCancel();
+    lpTimer = setTimeout(() => {
+      lpTimer = null; lpFired = true;
+      try { if (navigator.vibrate) navigator.vibrate(15); } catch (err) { /* 無視 */ }
+      if (el.dataset.lp === 'prn') openMedTime('prn', '', el.dataset.label);
+      else openMedTime(el.dataset.f, el.dataset.v, el.dataset.label);
+    }, 500);
+  });
+  document.addEventListener('pointermove', (e) => { if (lpTimer && lpPos && Math.hypot(e.clientX - lpPos[0], e.clientY - lpPos[1]) > 10) lpCancel(); });
+  ['pointerup', 'pointercancel'].forEach((t) => document.addEventListener(t, lpCancel));
+  document.addEventListener('contextmenu', (e) => { if (e.target.closest && e.target.closest('[data-lp]')) e.preventDefault(); });
+
   document.addEventListener('click', (e) => {
+    if (lpFired) { lpFired = false; e.preventDefault(); return; } // 長押しのあとのクリック
     const el = e.target.closest('[data-act]');
     if (!el) return;
     const act = el.dataset.act;
@@ -1002,11 +1072,29 @@
         break;
       }
       case 'med': {
-        const f = el.dataset.f; const v = el.dataset.v; const m = parseMed(obsNow()[f]);
-        saveObs({ [f]: m.st === v ? '' : v === 'no' ? 'no' : v + (m.t ? ' ' + m.t : '') });
+        const f = el.dataset.f; const v = el.dataset.v; const label = el.dataset.label;
+        const m = parseMed(obsNow()[f], f === 'med_morning');
+        if (m.st === v) { saveObs({ [f]: '' }); toast(`「${label}」を取り消しました`); break; } // もう一度押すと取り消し
+        if (v === 'no') { saveObs({ [f]: 'no' }); break; }
+        if (curDate !== logicalToday()) { openMedTime(f, v, label); break; } // 前の日は時刻を入れてもらう
+        const t = nowHm();
+        saveObs({ [f]: `${v} ${t}` });
+        toast(`${label} ${t} で記録しました`, { label: '時刻を変える', onClick: () => openMedTime(f, v, label) });
         break;
       }
-      case 'prn': saveObs({ prn: Math.max(0, Math.min(20, Number(obsNow().prn || 0) + parseInt(el.dataset.d, 10))) }); break;
+      case 'prn-add': {
+        if (curDate !== logicalToday()) { openMedTime('prn', '', '頓服を飲んだ'); break; }
+        const t = nowHm();
+        const list = prnList(obsNow()); list.push(t); savePrn(list);
+        toast(`頓服 ${t} で記録しました`, { label: '時刻を変える', onClick: () => openMedTime('prn', '', '頓服を飲んだ', t) });
+        break;
+      }
+      case 'prn-del': {
+        const list = prnList(obsNow()); const t = list[parseInt(el.dataset.i, 10)];
+        if (t && confirm(`${t} の頓服を取り消しますか？`)) { list.splice(list.indexOf(t), 1); savePrn(list); }
+        break;
+      }
+      case 'medtime-save': medTimeSave(); break;
       case 'wake-now': saveObs({ wake_time: nowHm() }); break;
       case 'memo-new': sheet = { type: 'memo', date: el.dataset.date, text: '' }; renderOverlay(); break;
       case 'memo-save': memoSave(); break;
@@ -1080,16 +1168,13 @@
       return;
     }
     if (t.dataset && t.dataset.obs) { saveObs({ [t.dataset.obs]: t.value.trim() }); return; }
-    if (t.dataset && t.dataset.medTime) {
-      const f = t.dataset.medTime; const m = parseMed(obsNow()[f]);
-      if (m.st === 'yes' || m.st === 'part') saveObs({ [f]: m.st + (t.value ? ' ' + t.value : '') });
-    }
   });
   // シートの入力中の文字を覚えておく(描き直しても消えないように)
   document.addEventListener('input', (e) => {
     if (!sheet) return;
     const t = e.target;
     if (t.id === 'memo-text') sheet.text = t.value;
+    if (t.id === 'med-time') sheet.time = t.value;
     if (t.id === 'react-label') { sheet.label = t.value; const b = document.querySelector('.react-preview b'); if (b) b.textContent = t.value || '…'; }
     if (t.id === 'react-emoji') sheet.emoji = t.value;
   });
