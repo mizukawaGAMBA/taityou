@@ -1,6 +1,7 @@
 /* Service Worker — 画面のファイルをキャッシュして、通信が不安定でも開けるようにする。
  * API(別オリジンの Apps Script)はキャッシュしない。更新は「ネットワーク優先、失敗したらキャッシュ」。 */
-const CACHE = 'kuma-v2';
+const CACHE = 'kuma-v3';
+const KEEP = ['kuma-uploads']; // サイトで登録した画像の保存場所(アプリの更新では消さない)
 const SHELL = [
   './', './index.html', './app.js', './config.js', './style.css', './manifest.webmanifest',
   './report.html', './report.js',
@@ -9,6 +10,7 @@ const SHELL = [
   './images/kuma-love.svg', './images/kuma-cheer.svg', './images/kuma-crown.svg'
 ];
 // images.js に登録したそれ以外の画像は、一度表示されたときにキャッシュされる(ネットワーク優先)
+// サイトで登録した画像は app.js が kuma-uploads に入れる(ここでは通信しない)
 
 self.addEventListener('install', (event) => {
   event.waitUntil(
@@ -18,7 +20,7 @@ self.addEventListener('install', (event) => {
 
 self.addEventListener('activate', (event) => {
   event.waitUntil(
-    caches.keys().then((keys) => Promise.all(keys.filter((k) => k !== CACHE).map((k) => caches.delete(k)))).then(() => self.clients.claim())
+    caches.keys().then((keys) => Promise.all(keys.filter((k) => k !== CACHE && !KEEP.includes(k)).map((k) => caches.delete(k)))).then(() => self.clients.claim())
   );
 });
 

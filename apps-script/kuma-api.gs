@@ -14,6 +14,7 @@
  * 新しい版のコードに貼り替えても家族コードは消えない。
  * 先頭の @OnlyCurrentDoc は「このスプレッドシートだけを使う」という宣言(許可の範囲が狭くなる)。
  *
+ * 記録するのは家族(サポーター)。本人の端末には「くまとひとこと」だけを返し、記録の中身は渡さない。
  * 後半の Core(API 本体)は、ローカル開発サーバー(dev/server.js)からも同じコードで呼ばれる。
  * Apps Script の V8 で確実に動くよう、?. や ?? は使わない。
  */
@@ -24,7 +25,7 @@ var TIME_ZONE = 'Asia/Tokyo';
  * 1. Apps Script の入口
  * ===================================================================== */
 
-/** 初回に一度だけ実行: シートを作り、設定を確かめて結果を実行ログに出す。何度実行しても壊れない */
+/** 初回(とプログラムを貼り替えた時)に一度だけ実行: シートを作り、設定を確かめて結果を実行ログに出す。何度実行しても壊れない */
 function setup() {
   var ss = SpreadsheetApp.getActiveSpreadsheet();
   if (!ss) throw new Error('スプレッドシートのメニュー「拡張機能 → Apps Script」から開いたプロジェクトで実行してください');
@@ -43,6 +44,8 @@ function setup() {
 
   var lines = ['', '===== setup の結果 ====='];
   lines.push('✓ シート: ' + ss.getSheets().map(function (s) { return s.getName(); }).join(', '));
+  var old = ss.getSheets().map(function (s) { return s.getName(); }).filter(function (n) { return n === 'daily_log' || n === 'med_event'; });
+  if (old.length) lines.push('・ ' + old.join(', ') + ' は前の版のシートです。今の版では使わないので、消してもかまいません');
   var code = familyCode();
   if (!code) lines.push('✗ 家族コードがまだです。左の歯車「プロジェクトの設定」→「スクリプト プロパティ」に FAMILY_CODE を追加してください');
   else if (code.length < 8) lines.push('△ 家族コード: 設定済み(' + code.length + '文字)。8文字以上にするとより安全です');
@@ -52,7 +55,8 @@ function setup() {
   var jst = tz === TIME_ZONE || Utilities.formatDate(new Date(), tz, 'Z') === '+0900';
   lines.push(jst ? '✓ タイムゾーン: ' + tz + (tz === TIME_ZONE ? '' : '(日本時間と同じ +09:00)')
     : '△ タイムゾーン: ' + tz + '(このままでも動きます。気になる時は SETUP.md の「タイムゾーンを日本にする」)');
-  lines.push(code ? '→ 次は右上の「デプロイ → 新しいデプロイ」です' : '→ 家族コードを追加したら、もう一度 setup を実行して ✓ になるか確かめてください');
+  lines.push(code ? '→ 次は右上の「デプロイ」です(初めては「新しいデプロイ」、貼り替えた時は「デプロイを管理」→ 新バージョン)'
+    : '→ 家族コードを追加したら、もう一度 setup を実行して ✓ になるか確かめてください');
   Logger.log(lines.join('\n'));
 }
 
@@ -64,7 +68,7 @@ function familyCode() {
 function doGet(e) {
   var p = (e && e.parameter) || {};
   if (!p.action) {
-    return respond({ ok: true, message: 'Recording Health API', family_code: familyCode() ? '設定済み' : '未設定', time: new Date().toISOString() });
+    return respond({ ok: true, message: 'Recording Health API', version: Core.VERSION, family_code: familyCode() ? '設定済み' : '未設定', time: new Date().toISOString() });
   }
   var req = {};
   Object.keys(p).forEach(function (k) { req[k] = p[k]; });
@@ -129,7 +133,8 @@ SheetStore.prototype.sheet = function (name) {
   if (!headers) throw new Error('不明なテーブル: ' + name);
   if (!sh) {
     sh = this.ss.insertSheet(name);
-    sh.getRange(1, 1, sh.getMaxRows(), Math.max(headers.length, sh.getMaxColumns())).setNumberFormat('@');
+    if (sh.getMaxColumns() < headers.length) sh.insertColumnsAfter(sh.getMaxColumns(), headers.length - sh.getMaxColumns());
+    sh.getRange(1, 1, sh.getMaxRows(), sh.getMaxColumns()).setNumberFormat('@');
     sh.getRange(1, 1, 1, headers.length).setValues([headers]).setFontWeight('bold');
     sh.setFrozenRows(1);
   } else if (!this.checked[name]) {
@@ -145,27 +150,59 @@ SheetStore.prototype.sheet = function (name) {
   return sh;
 };
 
-SheetStore.prototype.all = function (name) {
-  if (this.cache[name]) return this.cache[name];
+// 先頭の n 列を、空でない行だけ読む(n を省くと全部の列)
+SheetStore.prototype.readRows = function (name, n) {
   var sh = this.sheet(name);
-  var headers = Core.TABLES[name];
+  var headers = Core.TABLES[name].slice(0, n || Core.TABLES[name].length);
   var rows = [];
   var lastRow = sh.getLastRow();
   if (lastRow >= 2) {
     var values = sh.getRange(2, 1, lastRow - 1, headers.length).getValues();
     for (var i = 0; i < values.length; i++) {
-      var obj = {}, empty = true;
-      for (var c = 0; c < headers.length; c++) {
-        var v = values[i][c];
-        if (v instanceof Date) v = Utilities.formatDate(v, TIME_ZONE, "yyyy-MM-dd'T'HH:mm");
-        if (v !== '' && v !== null && v !== undefined) empty = false;
-        obj[headers[c]] = v;
-      }
-      if (!empty) { obj._row = i + 2; rows.push(obj); }
+      var obj = rowObject(headers, values[i]);
+      if (obj) { obj._row = i + 2; rows.push(obj); }
     }
   }
-  this.cache[name] = rows;
   return rows;
+};
+
+SheetStore.prototype.all = function (name) {
+  if (!this.cache[name]) this.cache[name] = this.readRows(name);
+  return this.cache[name];
+};
+
+// 先頭の n 列だけを読む(画像の一覧など、大きなデータの列まで読みたくない時)
+SheetStore.prototype.head = function (name, n) {
+  if (this.cache[name]) return this.cache[name];
+  var key = name + '#' + n;
+  if (!this.cache[key]) this.cache[key] = this.readRows(name, n);
+  return this.cache[key];
+};
+
+// keyField が keyValue の行を 1 行だけ読む(全部は読まない)
+SheetStore.prototype.find = function (name, keyField, keyValue) {
+  var headers = Core.TABLES[name];
+  var sh = this.sheet(name);
+  var col = headers.indexOf(keyField) + 1;
+  var lastRow = sh.getLastRow();
+  if (col < 1 || lastRow < 2) return null;
+  var keys = sh.getRange(2, col, lastRow - 1, 1).getValues();
+  for (var i = 0; i < keys.length; i++) {
+    if (String(keys[i][0]) === String(keyValue)) {
+      var obj = rowObject(headers, sh.getRange(i + 2, 1, 1, headers.length).getValues()[0]) || {};
+      obj._row = i + 2;
+      return obj;
+    }
+  }
+  return null;
+};
+
+// キャッシュを捨てる。keepAll のときは、全部の列を読んだキャッシュ(書き換えた行も反映ずみ)は残す
+SheetStore.prototype.forget = function (name, keepAll) {
+  var self = this;
+  Object.keys(this.cache).forEach(function (k) {
+    if (k.indexOf(name + '#') === 0 || (k === name && !keepAll)) delete self.cache[k];
+  });
 };
 
 SheetStore.prototype.insert = function (name, obj) {
@@ -174,29 +211,49 @@ SheetStore.prototype.insert = function (name, obj) {
   var row = headers.map(function (h) { return toCell(obj[h]); });
   var r = sh.getLastRow() + 1;
   sh.getRange(r, 1, 1, headers.length).setNumberFormat('@').setValues([row]);
-  delete this.cache[name];
+  this.forget(name);
 };
 
 SheetStore.prototype.update = function (name, keyField, keyValue, patch) {
-  var rows = this.all(name);
+  var headers = Core.TABLES[name];
   var found = null;
-  for (var i = 0; i < rows.length; i++) {
-    if (String(rows[i][keyField]) === String(keyValue)) { found = rows[i]; break; }
+  if (this.cache[name]) {
+    var rows = this.cache[name];
+    for (var i = 0; i < rows.length; i++) {
+      if (String(rows[i][keyField]) === String(keyValue)) { found = rows[i]; break; }
+    }
+  } else {
+    found = this.find(name, keyField, keyValue);
   }
   if (!found) return false;
-  var headers = Core.TABLES[name];
   Object.keys(patch).forEach(function (k) { if (headers.indexOf(k) >= 0) found[k] = patch[k]; });
   var row = headers.map(function (h) { return toCell(found[h]); });
   this.sheet(name).getRange(found._row, 1, 1, headers.length).setNumberFormat('@').setValues([row]);
+  this.forget(name, true);
   return true;
 };
+
+function rowObject(headers, values) {
+  var obj = {}, empty = true;
+  for (var c = 0; c < headers.length; c++) {
+    var v = values[c];
+    if (v instanceof Date) v = Utilities.formatDate(v, TIME_ZONE, "yyyy-MM-dd'T'HH:mm");
+    if (v !== '' && v !== null && v !== undefined) empty = false;
+    obj[headers[c]] = v;
+  }
+  return empty ? null : obj;
+}
 
 function toCell(v) {
   if (v === null || v === undefined) return '';
   if (v === true) return '1';
   if (v === false) return '0';
-  if (typeof v === 'object') return JSON.stringify(v);
-  return String(v);
+  if (typeof v === 'object') v = JSON.stringify(v);
+  v = String(v);
+  // = + - @ で始まる文字はスプレッドシートが数式として読もうとするので、先頭に ' を付けて文字のまま入れる
+  // (' はセルに表示されず、読み出した値にも入らない)。-5 のような数字はそのまま
+  if (/^[=+\-@]/.test(v) && !/^-?\d+(\.\d+)?$/.test(v)) return "'" + v;
+  return v;
 }
 
 /* =====================================================================
@@ -205,49 +262,71 @@ function toCell(v) {
  *   Core.handle(req, store, env) -> レスポンスオブジェクト
  *     req   : { action, token, ...パラメータ }
  *     store : { all(table), insert(table,obj), update(table,keyField,keyValue,patch) }
+ *             あれば head(table, n) と find(table, keyField, keyValue) も使う(大きな画像のデータを読まないため)
  *     env   : { familyCode, now(), today(), uuid(), sha256(str), randomToken() }
  *
- * 日付は「論理日」(午前4時区切り)の "YYYY-MM-DD" 文字列。時刻は "YYYY-MM-DDTHH:MM" のローカル時刻文字列。
+ * 日付は「論理日」(午前4時区切り)の "YYYY-MM-DD" 文字列。時刻は "HH:MM"。
  * ===================================================================== */
 var Core = (function () {
+  var VERSION = 3;
+  var IMAGE_PARTS = 10;       // 1 枚の画像を最大 10 個のセルに分けて入れる
+  var IMAGE_CHUNK = 40000;    // 1 セルに入れる文字数(セルの上限は 50,000 文字)
+  var IMAGE_META_COLS = 7;    // 画像の表の、データ以外の列の数
+  var imageCols = ['id', 'name', 'mime', 'w', 'h', 'created_at', 'deleted'];
+  for (var ic = 0; ic < IMAGE_PARTS; ic++) imageCols.push('d' + ic);
+
   var TABLES = {
     devices:      ['id', 'token_hash', 'role', 'name', 'created_at', 'last_seen'],
-    daily_log:    ['date', 'dizziness', 'pain', 'alcohol', 'sleep_feel', 'meds_answer', 'note', 'duration_sec', 'updated_at'],
-    med_event:    ['id', 'date', 'kind', 'taken_at', 'partial', 'deleted', 'created_at', 'updated_at'],
+    // 家族の観察(1 日 1 行)。本人には何もたずねない
+    observe:      ['date', 'wake_time', 'getup', 'gait', 'lying', 'outing', 'meal', 'movement',
+                   'med_morning', 'med_extra', 'med_night', 'prn', 'alcohol',
+                   'easy_times', 'good_note', 'complaint', 'complaint_note', 'recorded_by', 'updated_at'],
+    // iPhone / Apple Watch から自動で届く値(1 日 1 行)。列は右に足していく(前の版のシートとそろえるため)
     health_daily: ['date', 'sleep_min', 'inbed_min', 'awakenings', 'deep_min', 'rem_min', 'bed_start', 'bed_end',
-                   'steps', 'steadiness', 'resting_hr', 'hrv', 'dyskinesia', 'source', 'updated_at'],
+                   'steps', 'steadiness', 'resting_hr', 'hrv', 'move_score', 'source', 'updated_at', 'nap_min', 'walking_speed'],
     memo:         ['id', 'date', 'ts', 'text', 'deleted', 'created_at'],
     reaction:     ['id', 'date', 'from_name', 'type', 'message', 'seen', 'created_at', 'label', 'image'],
-    settings:     ['key', 'value']
+    settings:     ['key', 'value'],
+    image:        imageCols
   };
 
   var DEFAULT_SETTINGS = {
     patient_name: '',
     supporter_name: '',
-    meds_morning: '',
-    meds_night: '',
-    concerta_label: 'コンサータ',
-    notify_morning: '08:00',
-    notify_night: '21:30',
+    med2_label: '',                        // 3 つ目の薬のボタン名(空なら「朝の薬」「寝る前の薬」の 2 つだけ)
     next_appointment: '',
     last_appointment: '',
-    ask_sleep_feel: '0',
-    ask_dyskinesia: '0',
+    report_note: '',                       // レポートの最初に印刷する、家族から先生へのひとこと
     health_shortcut_url: '',               // サポーターが作って共有したショートカットの iCloud リンク
-    health_shortcut_name: 'くまヘルス送信', // そのショートカットの名前(アプリから実行するのに使う)
-    health_consent: '0',                   // 本人の同意(1 = 同意している)。本人だけが consentHealth で変えられる
+    health_shortcut_name: 'くまヘルス送信', // そのショートカットの名前(アプリから試しに実行するのに使う)
+    health_consent: '0',                   // 本人の同意(1 = 同意している)。同意できるのは本人の端末だけ
     health_consent_at: '',
-    health_consent_by: ''
+    health_consent_by: '',
+    health_last_at: '',                    // 最後に健康データを保存した時刻と、その内容の短い説明
+    health_last: '',
+    health_try_at: '',                     // 同意の前に届いた(保存しなかった)試しの送信
+    health_try: '',
+    image_config: ''                       // サイトで選んだ画像とリアクションの種類(JSON)
   };
-  // saveSettings では変えられない設定(本人の同意は本人の操作でだけ変わる)
-  var PROTECTED_SETTINGS = { health_consent: 1, health_consent_at: 1, health_consent_by: 1 };
+  // saveSettings では変えられない設定(それぞれ専用の操作でだけ変わる)
+  var PROTECTED_SETTINGS = { health_consent: 1, health_consent_at: 1, health_consent_by: 1, health_last_at: 1, health_last: 1,
+    health_try_at: 1, health_try: 1, image_config: 1 };
+  // 本人の端末に渡す設定(記録の中身や、先生へのメモは渡さない)
+  var PATIENT_SETTINGS = ['supporter_name', 'health_shortcut_url', 'health_shortcut_name', 'health_consent', 'health_consent_at', 'health_last_at', 'image_config'];
 
-  var MED_KINDS = { morning: 1, concerta: 1, night: 1, prn: 1 };
-  // リアクションの種類は docs/images/images.js で増やせるので、ここでは id の形だけを確かめる
+  // 観察の項目。数字の範囲は [最小, 最大]
+  var OBS_SCALES = { getup: [0, 2], gait: [0, 2], lying: [0, 3], outing: [0, 2], meal: [0, 3], movement: [1, 5], alcohol: [0, 1] };
+  var OBS_SETS = { easy_times: ['morning', 'noon', 'evening', 'night'], complaint: ['pain', 'dizzy', 'other'] };
+  var OBS_TEXTS = { good_note: 500, complaint_note: 500 };
+  var MED_FIELDS = ['med_morning', 'med_extra', 'med_night'];
+  // 薬: "yes" 飲んだ / "part" 一部 / "no" 飲まなかった。時刻がわかれば "yes 08:10" のように後ろに付ける
+  var MED_RE = /^(?:(?:yes|part)(?: (?:[01]\d|2[0-3]):[0-5]\d)?|no)$/;
+  var SLOT_KEYS = ['title', 'loading', 'normal', 'sleepy', 'love', 'happy', 'role_patient', 'role_supporter'];
+  var HEALTH_SCALARS = ['steadiness', 'resting_hr', 'hrv', 'move_score', 'walking_speed'];
+  var HEALTH_TEXT = { steadiness: 1 };
+  var SLEEP_FIELDS = ['sleep_min', 'inbed_min', 'awakenings', 'deep_min', 'rem_min', 'bed_start', 'bed_end', 'nap_min'];
+
   function isReactionType(s) { return typeof s === 'string' && /^[a-z0-9_-]{1,32}$/i.test(s); }
-  var HEALTH_FIELDS = ['sleep_min', 'inbed_min', 'awakenings', 'deep_min', 'rem_min', 'bed_start', 'bed_end',
-                       'steps', 'steadiness', 'resting_hr', 'hrv', 'dyskinesia'];
-  var HEALTH_TEXT_FIELDS = { bed_start: 1, bed_end: 1, steadiness: 1 };
 
   // ---------- 小さなユーティリティ ----------
   function isBlank(v) { return v === null || v === undefined || v === ''; }
@@ -268,7 +347,9 @@ var Core = (function () {
   function pad2(n) { return (n < 10 ? '0' : '') + n; }
   function isDateStr(s) { return typeof s === 'string' && /^\d{4}-\d{2}-\d{2}$/.test(s); }
   function isTimeStr(s) { return typeof s === 'string' && /^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}$/.test(s); }
+  function isHm(s) { return typeof s === 'string' && /^(?:[01]\d|2[0-3]):[0-5]\d$/.test(s); }
   function commas(n) { return String(Math.round(n)).replace(/\B(?=(\d{3})+(?!\d))/g, ','); }
+  function md(ds) { var p = ds.split('-'); return parseInt(p[1], 10) + '/' + parseInt(p[2], 10); }
 
   function addDays(dateStr, n) {
     var p = dateStr.split('-').map(Number);
@@ -287,30 +368,29 @@ var Core = (function () {
   }
 
   // ---------- レコードの型を整える ----------
-  function normLog(r) {
-    return {
-      date: toStr(r.date), dizziness: toInt(r.dizziness), pain: toInt(r.pain),
-      alcohol: isBlank(r.alcohol) ? null : (truthy(r.alcohol) ? 1 : 0),
-      sleep_feel: toInt(r.sleep_feel), meds_answer: toStr(r.meds_answer) || null,
-      note: toStr(r.note), duration_sec: toInt(r.duration_sec), updated_at: toStr(r.updated_at)
-    };
+  function normObs(r) {
+    var o = { date: toStr(r.date), wake_time: toStr(r.wake_time) };
+    for (var k in OBS_SCALES) o[k] = toInt(r[k]);
+    MED_FIELDS.forEach(function (f) { o[f] = toStr(r[f]); });
+    o.prn = toInt(r.prn);
+    for (var s in OBS_SETS) o[s] = toStr(r[s]);
+    for (var t in OBS_TEXTS) o[t] = toStr(r[t]);
+    o.recorded_by = toStr(r.recorded_by);
+    o.updated_at = toStr(r.updated_at);
+    return o;
   }
-  function normMed(r) {
-    var partial = null;
-    if (!isBlank(r.partial)) {
-      try { partial = typeof r.partial === 'string' ? JSON.parse(r.partial) : r.partial; } catch (e) { partial = null; }
-    }
-    return {
-      id: toStr(r.id), date: toStr(r.date), kind: toStr(r.kind), taken_at: toStr(r.taken_at),
-      partial: partial, deleted: truthy(r.deleted) ? 1 : 0, created_at: toStr(r.created_at), updated_at: toStr(r.updated_at)
-    };
+  function hasObs(o) {
+    if (o.wake_time || o.good_note || o.complaint || o.complaint_note || o.easy_times || o.prn !== null) return true;
+    for (var k in OBS_SCALES) if (o[k] !== null) return true;
+    for (var i = 0; i < MED_FIELDS.length; i++) if (o[MED_FIELDS[i]]) return true;
+    return false;
   }
   function normHealth(r) {
     return {
       date: toStr(r.date), sleep_min: toInt(r.sleep_min), inbed_min: toInt(r.inbed_min), awakenings: toInt(r.awakenings),
       deep_min: toInt(r.deep_min), rem_min: toInt(r.rem_min), bed_start: toStr(r.bed_start) || null, bed_end: toStr(r.bed_end) || null,
-      steps: toInt(r.steps), steadiness: toStr(r.steadiness) || null, resting_hr: toNum(r.resting_hr), hrv: toNum(r.hrv),
-      dyskinesia: toNum(r.dyskinesia), source: toStr(r.source), updated_at: toStr(r.updated_at)
+      nap_min: toInt(r.nap_min), steps: toInt(r.steps), steadiness: toStr(r.steadiness) || null, walking_speed: toNum(r.walking_speed),
+      resting_hr: toNum(r.resting_hr), hrv: toNum(r.hrv), move_score: toNum(r.move_score), source: toStr(r.source), updated_at: toStr(r.updated_at)
     };
   }
   function normMemo(r) {
@@ -320,6 +400,10 @@ var Core = (function () {
     return { id: toStr(r.id), date: toStr(r.date), from_name: toStr(r.from_name), type: toStr(r.type), label: toStr(r.label), image: toStr(r.image),
       message: toStr(r.message), seen: truthy(r.seen) ? 1 : 0, created_at: toStr(r.created_at) };
   }
+  function normImageMeta(r) {
+    return { id: toStr(r.id), name: toStr(r.name), mime: toStr(r.mime), w: toInt(r.w), h: toInt(r.h),
+      created_at: toStr(r.created_at), deleted: truthy(r.deleted) ? 1 : 0 };
+  }
 
   // ---------- データ取得ヘルパー ----------
   function getSettings(store) {
@@ -328,19 +412,28 @@ var Core = (function () {
     store.all('settings').forEach(function (r) { if (!isBlank(r.key)) out[toStr(r.key)] = toStr(r.value); });
     return out;
   }
+  function patientSettings(s) {
+    var out = {};
+    PATIENT_SETTINGS.forEach(function (k) { out[k] = s[k] === undefined ? '' : s[k]; });
+    return out;
+  }
+  function settingsFor(device, store) {
+    var s = getSettings(store);
+    return device.role === 'supporter' ? s : patientSettings(s);
+  }
   function setSetting(store, key, value) {
     var rows = store.all('settings');
     for (var i = 0; i < rows.length; i++) {
-      if (toStr(rows[i].key) === key) { store.update('settings', 'key', key, { value: value }); return; }
+      if (toStr(rows[i].key) === key) {
+        if (toStr(rows[i].value) !== value) store.update('settings', 'key', key, { value: value });
+        return;
+      }
     }
     store.insert('settings', { key: key, value: value });
   }
-  function logsBetween(store, from, to) {
-    return store.all('daily_log').map(normLog).filter(function (r) { return r.date >= from && r.date <= to; });
-  }
-  function medsBetween(store, from, to) {
-    return store.all('med_event').map(normMed).filter(function (r) { return !r.deleted && r.date >= from && r.date <= to; })
-      .sort(function (a, b) { return a.taken_at < b.taken_at ? -1 : a.taken_at > b.taken_at ? 1 : 0; });
+  function obsBetween(store, from, to) {
+    return store.all('observe').map(normObs).filter(function (r) { return r.date >= from && r.date <= to; })
+      .sort(function (a, b) { return a.date < b.date ? -1 : 1; });
   }
   function healthBetween(store, from, to) {
     return store.all('health_daily').map(normHealth).filter(function (r) { return r.date >= from && r.date <= to; });
@@ -348,6 +441,10 @@ var Core = (function () {
   function memosBetween(store, from, to) {
     return store.all('memo').map(normMemo).filter(function (r) { return !r.deleted && r.date >= from && r.date <= to; })
       .sort(function (a, b) { return a.ts < b.ts ? -1 : 1; });
+  }
+  function imageMeta(store) {
+    var rows = store.head ? store.head('image', IMAGE_META_COLS) : store.all('image');
+    return rows.map(normImageMeta).filter(function (r) { return r.id && !r.deleted; });
   }
   function findOne(list, field, value) {
     for (var i = 0; i < list.length; i++) if (list[i][field] === value) return list[i];
@@ -364,11 +461,9 @@ var Core = (function () {
     if (!d) throw fail('unauthorized', 'ログイン情報が無効です。もう一度ログインしてください(ショートカットの場合は連携キーを確かめてください)');
     return { id: toStr(d.id), role: toStr(d.role), name: toStr(d.name) };
   }
-  function requireRole(device, roles) {
-    if (roles.indexOf(device.role) < 0) throw fail('forbidden', 'この操作はできません');
-  }
 
-  // ---------- ヘルスケアサンプルの集計 ----------
+  // ---------- ヘルスケアの値の集計 ----------
+  // ショートカットの日付("2026-11-03 23:12" など、タイムゾーンなし)は日本時間として読む
   function parseWhen(s) {
     if (s instanceof Date) return s.getTime();
     if (typeof s === 'number') return s;
@@ -376,11 +471,11 @@ var Core = (function () {
     var t = String(s).trim()
       .replace(/(\d{4})年(\d{1,2})月(\d{1,2})日/, '$1-$2-$3') // 「2026年10月31日 23:12」の形も読む
       .replace(/\//g, '-').replace(/\s+/, 'T');
-    // "2026-10-31T23:12:05" (タイムゾーンなし) はローカル時刻として扱う
-    var m = t.match(/^(\d{4})-(\d{1,2})-(\d{1,2})T(\d{1,2}):(\d{2})(?::(\d{2}))?$/);
-    if (m) return new Date(+m[1], +m[2] - 1, +m[3], +m[4], +m[5], m[6] ? +m[6] : 0).getTime();
+    var m = t.match(/^(\d{4})-(\d{1,2})-(\d{1,2})(?:T(\d{1,2}):(\d{2})(?::(\d{2}))?)?$/);
+    if (m) return new Date(+m[1], +m[2] - 1, +m[3], m[4] ? +m[4] : 0, m[5] ? +m[5] : 0, m[6] ? +m[6] : 0).getTime();
     return Date.parse(t);
   }
+  function ymdOf(ms) { var d = new Date(ms); return d.getFullYear() + '-' + pad2(d.getMonth() + 1) + '-' + pad2(d.getDate()); }
   function hm(ms) { var d = new Date(ms); return pad2(d.getHours()) + ':' + pad2(d.getMinutes()); }
   function sleepCategory(v) {
     if (v === null || v === undefined) return 'core';
@@ -388,76 +483,114 @@ var Core = (function () {
     var s = String(v).toLowerCase();
     if (/^\d+$/.test(s)) return sleepCategory(parseInt(s, 10));
     if (s.indexOf('bed') >= 0 || s.indexOf('ベッド') >= 0 || s.indexOf('就床') >= 0) return 'inbed';
-    if (s.indexOf('awake') >= 0 || s.indexOf('覚醒') >= 0 || s.indexOf('目覚') >= 0) return 'awake';
+    if (s.indexOf('awake') >= 0 || s.indexOf('覚醒') >= 0 || s.indexOf('目覚') >= 0 || s.indexOf('起き') >= 0) return 'awake';
     if (s.indexOf('deep') >= 0 || s.indexOf('深') >= 0) return 'deep';
     if (s.indexOf('rem') >= 0 || s.indexOf('レム') >= 0) return 'rem';
     return 'core';
   }
-  function aggregateSamples(samples) {
-    var out = {};
-    var sleep = { inbed: 0, core: 0, deep: 0, rem: 0, awake: 0 };
-    var awakeSegments = 0, lastWasSleep = false;
-    var minStart = Infinity, maxEnd = -Infinity, anySleep = false;
-    var steps = 0, anySteps = false;
-    var hrs = [], hrvs = [], steadiness = null, dysk = null;
-    var sleepSamples = samples.filter(function (s) { return toStr(s.type).toLowerCase().indexOf('sleep') === 0 || toStr(s.type) === '睡眠'; })
-      .map(function (s) { return { start: parseWhen(s.start), end: parseWhen(s.end), cat: sleepCategory(s.value) }; })
-      .filter(function (s) { return !isNaN(s.start) && !isNaN(s.end) && s.end > s.start; })
-      .sort(function (a, b) { return a.start - b.start; });
-    sleepSamples.forEach(function (s) {
-      var min = (s.end - s.start) / 60000;
-      sleep[s.cat] += min;
-      if (s.cat !== 'inbed') {
-        anySleep = true;
-        if (s.start < minStart) minStart = s.start;
-        if (s.end > maxEnd) maxEnd = s.end;
-        if (s.cat === 'awake') { if (lastWasSleep) awakeSegments++; lastWasSleep = false; }
-        else lastWasSleep = true;
-      }
+  // 区間 [[開始,終了], ...] を重なりのない形にまとめる(iPhone と Watch の記録が重なっても二重に数えない)
+  function union(list) {
+    var a = list.slice().sort(function (x, y) { return x[0] - y[0]; });
+    var out = [];
+    a.forEach(function (iv) {
+      var last = out[out.length - 1];
+      if (last && iv[0] <= last[1]) { if (iv[1] > last[1]) last[1] = iv[1]; }
+      else out.push([iv[0], iv[1]]);
     });
-    samples.forEach(function (s) {
-      var t = toStr(s.type).toLowerCase();
-      var v = toNum(s.value);
-      if (t === 'steps' || t === '歩数') { if (v !== null) { steps += v; anySteps = true; } }
-      else if (t === 'resting_hr' || t === 'restingheartrate') { if (v !== null) hrs.push(v); }
-      else if (t === 'hrv') { if (v !== null) hrvs.push(v); }
-      else if (t === 'steadiness' || t === 'walkingsteadiness') { if (!isBlank(s.value)) steadiness = String(s.value); }
-      else if (t === 'dyskinesia') { if (v !== null) dysk = v; }
-    });
-    if (anySleep) {
-      var asleep = sleep.core + sleep.deep + sleep.rem;
-      out.sleep_min = Math.round(asleep);
-      out.inbed_min = Math.round(sleep.inbed > 0 ? sleep.inbed : asleep + sleep.awake);
-      out.awakenings = awakeSegments;
-      out.deep_min = Math.round(sleep.deep);
-      out.rem_min = Math.round(sleep.rem);
-      out.bed_start = hm(minStart);
-      out.bed_end = hm(maxEnd);
-    }
-    if (anySteps) out.steps = Math.round(steps);
-    if (hrs.length) out.resting_hr = Math.round(hrs.reduce(function (a, b) { return a + b; }, 0) / hrs.length * 10) / 10;
-    if (hrvs.length) out.hrv = Math.round(hrvs.reduce(function (a, b) { return a + b; }, 0) / hrvs.length * 10) / 10;
-    if (steadiness !== null) out.steadiness = steadiness;
-    if (dysk !== null) out.dyskinesia = dysk;
     return out;
   }
-  // "start|end|value" を1行ずつ書いたテキスト(ショートカットで作りやすい)をサンプル配列へ
-  function linesToSamples(text, type) {
-    if (isBlank(text)) return [];
-    return String(text).split(/\r?\n/).map(function (line) {
-      var parts = line.split(/\s*[|\t]\s*/);
-      if (parts.length < 2) return null;
-      return { type: type, start: parts[0], end: parts[1], value: parts.length > 2 ? parts[2] : null };
-    }).filter(Boolean);
+  function spanMin(list) { return list.reduce(function (a, iv) { return a + (iv[1] - iv[0]); }, 0) / 60000; }
+  function clip(list, s, e) {
+    return list.map(function (iv) { return [Math.max(iv[0], s), Math.min(iv[1], e)]; }).filter(function (iv) { return iv[1] > iv[0]; });
   }
-  // ショートカットの通知に出す短い説明
-  function describeHealth(h) {
+  // 2 時間より長く空いたら別の眠り(昼寝など)とする
+  function splitSessions(merged) {
+    var out = [], cur = [];
+    merged.forEach(function (iv) {
+      if (cur.length && iv[0] - cur[cur.length - 1][1] > 2 * 3600000) { out.push(cur); cur = []; }
+      cur.push(iv);
+    });
+    if (cur.length) out.push(cur);
+    return out;
+  }
+  function longest(sessions) {
+    var best = sessions[0];
+    sessions.forEach(function (s) { if (spanMin(s) > spanMin(best)) best = s; });
+    return best;
+  }
+  // 1 晩分(前日 18 時〜当日 18 時に始まった記録)の眠りをまとめる。いちばん長い眠りを「夜の眠り」、残りを昼寝などとする
+  function summarizeNight(samples) {
+    function pick(cats) {
+      return union(samples.filter(function (s) { return cats.indexOf(s.cat) >= 0; }).map(function (s) { return [s.start, s.end]; }));
+    }
+    var asleep = pick(['core', 'deep', 'rem']);
+    var inbed = pick(['inbed']);
+    var out = {};
+    SLEEP_FIELDS.forEach(function (f) { out[f] = null; });
+    if (!asleep.length) {
+      if (!inbed.length) return null;
+      var ib = longest(splitSessions(inbed));
+      out.inbed_min = Math.round(spanMin(ib));
+      out.bed_start = hm(ib[0][0]);
+      out.bed_end = hm(ib[ib.length - 1][1]);
+      return out;
+    }
+    var main = longest(splitSessions(asleep));
+    var ms = main[0][0], me = main[main.length - 1][1];
+    out.sleep_min = Math.round(spanMin(main));
+    out.nap_min = Math.round(spanMin(asleep) - spanMin(main));
+    var aw = 0;
+    for (var i = 1; i < main.length; i++) if (main[i][0] - main[i - 1][1] >= 5 * 60000) aw++; // 5 分以上目が覚めた回数
+    out.awakenings = aw;
+    var deep = pick(['deep']), rem = pick(['rem']);
+    if (deep.length || rem.length) {
+      out.deep_min = Math.round(spanMin(clip(deep, ms, me)));
+      out.rem_min = Math.round(spanMin(clip(rem, ms, me)));
+    }
+    var ibc = clip(inbed, ms - 2 * 3600000, me + 2 * 3600000);
+    out.inbed_min = Math.round(ibc.length ? spanMin(union(ibc.concat([[ms, me]]))) : (me - ms) / 60000);
+    out.bed_start = hm(ms);
+    out.bed_end = hm(me);
+    return out;
+  }
+  // "開始|終了|値" を 1 行ずつ書いたテキスト(ショートカットで作りやすい)を配列へ
+  function splitLines(text) {
+    if (isBlank(text)) return [];
+    return String(text).split(/\r?\n/).map(function (line) { return line.trim().split(/\s*[|\t]\s*/); })
+      .filter(function (parts) { return parts.length >= 2 && parts[0]; });
+  }
+  function isSleepType(t) { t = toStr(t).toLowerCase(); return t.indexOf('sleep') === 0 || t === '睡眠' || t === '睡眠分析'; }
+  function isStepsType(t) { t = toStr(t).toLowerCase(); return t === 'steps' || t === '歩数'; }
+  function sleepSamplesFrom(req) {
+    var raw = (Array.isArray(req.samples) ? req.samples : []).filter(function (s) { return s && isSleepType(s.type); });
+    splitLines(req.sleep_lines).forEach(function (p) { raw.push({ start: p[0], end: p[1], value: p.length > 2 ? p[2] : null }); });
+    return raw.map(function (s) { return { start: parseWhen(s.start), end: parseWhen(s.end), cat: sleepCategory(s.value) }; })
+      .filter(function (s) { return !isNaN(s.start) && !isNaN(s.end) && s.end > s.start && s.end - s.start < 24 * 3600000; });
+  }
+  // 歩数は日ごと(0 時区切り)に足す。ショートカットで「日ごとにグループ化」すれば 1 日 1 行で届く
+  function stepsByDate(req) {
+    var out = {};
+    function add(when, value) {
+      var t = parseWhen(when), v = toNum(value);
+      if (isNaN(t) || v === null) return;
+      var d = ymdOf(t);
+      out[d] = (out[d] || 0) + v;
+    }
+    splitLines(req.steps_lines).forEach(function (p) { add(p[0], p[p.length - 1]); });
+    (Array.isArray(req.samples) ? req.samples : []).forEach(function (s) { if (s && isStepsType(s.type)) add(s.start, s.value); });
+    return out;
+  }
+  function describeAll(patches) {
+    var ds = Object.keys(patches).sort();
     var parts = [];
-    var sm = toInt(h.sleep_min);
-    if (sm !== null) parts.push('眠り ' + Math.floor(sm / 60) + '時間' + (sm % 60) + '分');
-    if (toInt(h.awakenings) !== null && sm !== null) parts.push('途中で起きた ' + toInt(h.awakenings) + '回');
-    if (toNum(h.steps) !== null) parts.push('歩数 ' + commas(toNum(h.steps)) + '歩');
-    if (toNum(h.dyskinesia) !== null) parts.push('StrivePD ' + toNum(h.dyskinesia));
+    var sd = ds.filter(function (d) { return patches[d].sleep_min !== null && patches[d].sleep_min !== undefined; }).pop();
+    if (sd) {
+      var p = patches[sd];
+      parts.push(md(sd) + 'の眠り ' + Math.floor(p.sleep_min / 60) + '時間' + (p.sleep_min % 60) + '分' + (p.awakenings !== null && p.awakenings !== undefined ? '(目覚め ' + p.awakenings + '回)' : ''));
+    }
+    var std = ds.filter(function (d) { return patches[d].steps !== undefined; }).pop();
+    if (std) parts.push(md(std) + 'の歩数 ' + commas(patches[std].steps) + '歩');
+    if (!parts.length && ds.length) parts.push(md(ds[ds.length - 1]) + 'の値 ' + Object.keys(patches[ds[ds.length - 1]]).length + '項目');
     return parts.length ? parts.join('、') : '数値なし';
   }
 
@@ -465,7 +598,7 @@ var Core = (function () {
   var actions = {};
 
   actions.ping = function (req, store, env) {
-    return { ok: true, time: env.now(), version: 2 };
+    return { ok: true, time: env.now(), version: VERSION };
   };
 
   actions.login = function (req, store, env) {
@@ -474,81 +607,82 @@ var Core = (function () {
     var role = req.role === 'supporter' ? 'supporter' : 'patient';
     var token = env.randomToken();
     var now = env.now();
-    store.insert('devices', { id: env.uuid(), token_hash: env.sha256(token), role: role, name: toStr(req.name), created_at: now, last_seen: now });
-    return { ok: true, token: token, role: role, name: toStr(req.name), settings: getSettings(store) };
+    var device = { id: env.uuid(), token_hash: env.sha256(token), role: role, name: toStr(req.name).slice(0, 30), created_at: now, last_seen: now };
+    store.insert('devices', device);
+    return { ok: true, token: token, role: role, name: device.name, settings: settingsFor(device, store) };
   };
 
   actions.me = function (req, store, env, device) {
-    return { ok: true, role: device.role, name: device.name, settings: getSettings(store) };
+    return { ok: true, role: device.role, name: device.name, settings: settingsFor(device, store) };
   };
 
+  // 本人の画面(くまの部屋): まだ見ていないひとことと、画像の設定だけ
+  actions.room = function (req, store, env, device) {
+    var reactions = store.all('reaction').map(normReaction).filter(function (r) { return !r.seen; })
+      .sort(function (a, b) { return a.created_at < b.created_at ? -1 : 1; }).slice(-5);
+    return { ok: true, room: true, reactions: reactions, settings: patientSettings(getSettings(store)), images: imageMeta(store) };
+  };
+
+  // 記録する人の画面: その日の観察・自動の値・メモ
   actions.state = function (req, store, env, device) {
     var date = isDateStr(req.date) ? req.date : null;
     if (!date) throw fail('bad_request', 'date が必要です');
-    var yesterday = addDays(date, -1);
-    var logs = store.all('daily_log').map(normLog);
-    var log = findOne(logs, 'date', date);
-    var ylog = findOne(logs, 'date', yesterday);
-    var meds = medsBetween(store, yesterday, date);
-    var health = findOne(healthBetween(store, date, date), 'date', date);
-    var memos = memosBetween(store, date, date);
-    var reactions = store.all('reaction').map(normReaction).filter(function (r) { return !r.seen; })
-      .sort(function (a, b) { return a.created_at < b.created_at ? -1 : 1; }).slice(-5);
-    var since = addDays(date, -41);
-    var stampDates = logs.filter(function (r) { return r.date >= since && r.date <= date; }).map(function (r) { return r.date; });
+    var s = getSettings(store);
+    var all = store.all('observe').map(normObs);
+    var since = isDateStr(s.last_appointment) && s.last_appointment <= date ? s.last_appointment : addDays(date, -27);
+    var recorded = all.filter(function (r) { return r.date >= since && r.date <= date && hasObs(r); }).length;
+    var sent = store.all('reaction').map(normReaction).sort(function (a, b) { return a.created_at < b.created_at ? 1 : -1; }).slice(0, 5);
     return {
       ok: true, date: date,
-      log: log, meds: meds.filter(function (m) { return m.date === date; }),
-      yesterday: { date: yesterday, log: ylog, meds: meds.filter(function (m) { return m.date === yesterday; }) },
-      health: health, memos: memos, reactions: reactions,
-      stamps: { dates: stampDates, total: logs.length },
-      settings: getSettings(store)
+      obs: findOne(all, 'date', date),
+      health: findOne(healthBetween(store, date, date), 'date', date),
+      memos: memosBetween(store, date, date),
+      sent: sent,
+      progress: { since: since, recorded: recorded, days: daysBetween(since, date) + 1 },
+      settings: s, images: imageMeta(store)
     };
   };
 
-  actions.saveLog = function (req, store, env, device) {
+  actions.saveObs = function (req, store, env, device) {
     if (!isDateStr(req.date)) throw fail('bad_request', 'date が必要です');
-    var existing = findOne(store.all('daily_log').map(normLog), 'date', req.date);
-    var row = existing ? existing : { date: req.date };
-    function score(v) { var n = toInt(v); return n === null ? null : Math.max(0, Math.min(10, n)); }
-    if ('dizziness' in req) row.dizziness = score(req.dizziness);
-    if ('pain' in req) row.pain = score(req.pain);
-    if ('alcohol' in req) row.alcohol = isBlank(req.alcohol) ? null : (truthy(req.alcohol) ? 1 : 0);
-    if ('sleep_feel' in req) row.sleep_feel = toInt(req.sleep_feel);
-    if ('meds_answer' in req) row.meds_answer = toStr(req.meds_answer) || null;
-    if ('note' in req) row.note = toStr(req.note);
-    if ('duration_sec' in req) row.duration_sec = toInt(req.duration_sec);
+    if (req.date > env.today()) throw fail('bad_request', '先の日付には記録できません');
+    var existing = findOne(store.all('observe').map(normObs), 'date', req.date);
+    var row = existing ? existing : normObs({ date: req.date });
+    var changed = false;
+    function set(k, v) { if (row[k] !== v) { row[k] = v; changed = true; } }
+    if ('wake_time' in req) {
+      var w = toStr(req.wake_time).trim();
+      if (w && !isHm(w)) throw fail('bad_request', '起きてきた時刻は 07:30 の形です');
+      set('wake_time', w);
+    }
+    for (var k in OBS_SCALES) {
+      if (!(k in req)) continue;
+      var n = toInt(req[k]);
+      if (n !== null && (n < OBS_SCALES[k][0] || n > OBS_SCALES[k][1])) throw fail('bad_request', k + ' の値が範囲の外です');
+      set(k, n);
+    }
+    MED_FIELDS.forEach(function (f) {
+      if (!(f in req)) return;
+      var v = toStr(req[f]).trim();
+      if (v && !MED_RE.test(v)) throw fail('bad_request', '薬の記録の形が正しくありません');
+      set(f, v);
+    });
+    if ('prn' in req) {
+      var p = toInt(req.prn);
+      if (p !== null && (p < 0 || p > 20)) throw fail('bad_request', '頓服の回数が範囲の外です');
+      set('prn', p);
+    }
+    for (var sk in OBS_SETS) {
+      if (!(sk in req)) continue;
+      var vals = (Array.isArray(req[sk]) ? req[sk] : toStr(req[sk]).split(',')).map(function (v) { return toStr(v).trim(); });
+      set(sk, OBS_SETS[sk].filter(function (a) { return vals.indexOf(a) >= 0; }).join(',')); // 決まった順に並べる
+    }
+    for (var tk in OBS_TEXTS) if (tk in req) set(tk, toStr(req[tk]).trim().slice(0, OBS_TEXTS[tk]));
+    if (!changed) return { ok: true, obs: row };
+    row.recorded_by = device.name;
     row.updated_at = env.now();
-    if (existing) store.update('daily_log', 'date', req.date, row); else store.insert('daily_log', row);
-    return { ok: true, log: normLog(row) };
-  };
-
-  actions.addMed = function (req, store, env, device) {
-    if (!isDateStr(req.date)) throw fail('bad_request', 'date が必要です');
-    if (!MED_KINDS[req.kind]) throw fail('bad_request', 'kind が不正です');
-    if (!isTimeStr(req.taken_at)) throw fail('bad_request', 'taken_at が不正です');
-    var now = env.now();
-    var row = { id: env.uuid(), date: req.date, kind: req.kind, taken_at: req.taken_at,
-      partial: Array.isArray(req.partial) && req.partial.length ? JSON.stringify(req.partial) : '', deleted: 0, created_at: now, updated_at: now };
-    store.insert('med_event', row);
-    return { ok: true, med: normMed(row), clientId: req.clientId || null };
-  };
-
-  actions.updateMed = function (req, store, env, device) {
-    if (!req.id) throw fail('bad_request', 'id が必要です');
-    var patch = { updated_at: env.now() };
-    if ('taken_at' in req) { if (!isTimeStr(req.taken_at)) throw fail('bad_request', 'taken_at が不正です'); patch.taken_at = req.taken_at; }
-    if ('date' in req) { if (!isDateStr(req.date)) throw fail('bad_request', 'date が不正です'); patch.date = req.date; }
-    if ('partial' in req) patch.partial = Array.isArray(req.partial) && req.partial.length ? JSON.stringify(req.partial) : '';
-    if ('kind' in req) { if (!MED_KINDS[req.kind]) throw fail('bad_request', 'kind が不正です'); patch.kind = req.kind; }
-    if (!store.update('med_event', 'id', String(req.id), patch)) throw fail('not_found', '記録が見つかりません');
-    return { ok: true };
-  };
-
-  actions.deleteMed = function (req, store, env, device) {
-    if (!req.id) throw fail('bad_request', 'id が必要です');
-    if (!store.update('med_event', 'id', String(req.id), { deleted: 1, updated_at: env.now() })) throw fail('not_found', '記録が見つかりません');
-    return { ok: true };
+    if (existing) store.update('observe', 'date', req.date, row); else store.insert('observe', row);
+    return { ok: true, obs: row };
   };
 
   actions.addMemo = function (req, store, env, device) {
@@ -566,51 +700,85 @@ var Core = (function () {
     return { ok: true };
   };
 
+  // iPhone のショートカット(連携キー)から届く健康データ。
+  // 何度届いてもよい: 眠りは前より短い計算結果では上書きせず、歩数は大きい方を残す
   actions.health = function (req, store, env, device) {
-    var date = isDateStr(req.date) ? req.date : env.today();
-    var patch = {};
-    var samples = Array.isArray(req.samples) ? req.samples.slice() : [];
-    samples = samples.concat(linesToSamples(req.sleep_lines, 'sleep'));
-    samples = samples.concat(linesToSamples(req.steps_lines, 'steps'));
-    if (samples.length) {
-      var agg = aggregateSamples(samples);
-      for (var k in agg) patch[k] = agg[k];
-    }
-    HEALTH_FIELDS.forEach(function (f) {
-      if (!(f in req) || isBlank(req[f])) return;
-      var v = HEALTH_TEXT_FIELDS[f] ? toStr(req[f]) : toNum(req[f]);
-      if (v !== null && v !== '') patch[f] = v;
+    var today = env.today();
+    var oldest = addDays(today, -31);
+    var patches = {};
+    function patchFor(d) { if (!patches[d]) patches[d] = {}; return patches[d]; }
+    function inRange(d) { return d >= oldest && d <= today; }
+
+    var nights = {};
+    sleepSamplesFrom(req).forEach(function (s) {
+      var d = ymdOf(s.start + 6 * 3600000); // 18 時を区切りに「どの日の朝の眠りか」を決める
+      if (!nights[d]) nights[d] = [];
+      nights[d].push(s);
     });
-    if (!Object.keys(patch).length) {
+    Object.keys(nights).forEach(function (d) {
+      if (!inRange(d)) return; // 今まさに寝ている途中の夜(明日の分)は、明日の送信で入る
+      var n = summarizeNight(nights[d]);
+      if (n) { var p = patchFor(d); SLEEP_FIELDS.forEach(function (f) { p[f] = n[f]; }); }
+    });
+    var steps = stepsByDate(req);
+    Object.keys(steps).forEach(function (d) { if (inRange(d)) patchFor(d).steps = Math.round(steps[d]); });
+    if (!Object.keys(steps).length && !isBlank(req.steps) && toNum(req.steps) !== null) patchFor(today).steps = Math.round(toNum(req.steps));
+    HEALTH_SCALARS.forEach(function (f) {
+      if (!(f in req) || isBlank(req[f])) return;
+      var v = HEALTH_TEXT[f] ? toStr(req[f]).slice(0, 40) : toNum(req[f]);
+      if (v !== null && v !== '') patchFor(today)[f] = v;
+    });
+    if (!Object.keys(patches).length) {
       throw fail('bad_request', '取り込めるデータがありません(Apple Watch を着けて寝た翌朝に、もう一度試してください)');
     }
+    var summary = describeAll(patches);
     // ショートカット(連携キー)からの送信は、本人が「同意」している時だけ保存する
     if (device.role === 'health' && getSettings(store).health_consent !== '1') {
-      return { ok: false, error: 'no_consent', preview: patch,
-        message: '本人の同意がまだないので、保存しませんでした。読み取れた内容: ' + describeHealth(patch) };
+      setSetting(store, 'health_try_at', env.now());
+      setSetting(store, 'health_try', summary);
+      return { ok: false, error: 'no_consent', preview: patches, message: '本人の同意がまだないので、保存しませんでした。読み取れた内容: ' + summary };
     }
-    patch.source = toStr(req.source) || device.role;
-    patch.updated_at = env.now();
-    var existing = findOne(healthBetween(store, date, date), 'date', date);
-    if (existing) store.update('health_daily', 'date', date, patch);
-    else { patch.date = date; store.insert('health_daily', patch); }
-    return { ok: true, date: date, health: normHealth(existing ? Object.assign(existing, patch) : patch),
-      message: describeHealth(patch) + ' を、くまの記録に届けました' };
+
+    var rows = store.all('health_daily').map(normHealth);
+    var saved = [];
+    Object.keys(patches).sort().forEach(function (d) {
+      var p = patches[d];
+      var ex = findOne(rows, 'date', d);
+      var write = {};
+      if ('sleep_min' in p) {
+        var exSleep = ex ? ex.sleep_min : null;
+        var useSleep = p.sleep_min !== null
+          ? (exSleep === null || p.sleep_min >= exSleep)
+          : (exSleep === null && (!ex || ex.inbed_min === null || p.inbed_min >= ex.inbed_min));
+        if (useSleep) SLEEP_FIELDS.forEach(function (f) { if (!ex || ex[f] !== p[f]) write[f] = p[f]; });
+      }
+      if ('steps' in p && (!ex || ex.steps === null || p.steps > ex.steps)) write.steps = p.steps;
+      HEALTH_SCALARS.forEach(function (f) { if (f in p && (!ex || ex[f] !== p[f])) write[f] = p[f]; });
+      if (!Object.keys(write).length) return;
+      write.source = toStr(req.source).slice(0, 20) || device.role;
+      write.updated_at = env.now();
+      if (ex) store.update('health_daily', 'date', d, write);
+      else { write.date = d; store.insert('health_daily', write); }
+      saved.push(d);
+    });
+    setSetting(store, 'health_last_at', env.now());
+    setSetting(store, 'health_last', summary);
+    return { ok: true, dates: saved, message: summary + ' を受け取りました' };
   };
 
-  // 本人による、ヘルスケア連携への同意(agree: 1)と取り消し(agree: 0)
+  // ヘルスケア連携の同意(agree: 1)と取り消し(agree: 0)。同意できるのは本人の端末だけ。止めるのは家族もできる
   actions.consentHealth = function (req, store, env, device) {
     var agree = truthy(req.agree);
+    if (agree && device.role !== 'patient') throw fail('forbidden', '同意は本人の iPhone で行います');
     setSetting(store, 'health_consent', agree ? '1' : '0');
     setSetting(store, 'health_consent_at', env.now());
     setSetting(store, 'health_consent_by', device.name);
-    return { ok: true, settings: getSettings(store) };
+    return { ok: true, settings: settingsFor(device, store) };
   };
 
   actions.react = function (req, store, env, device) {
-    requireRole(device, ['supporter']);
     if (!isReactionType(req.type)) throw fail('bad_request', 'type が不正です');
-    // label / image は送信時の見た目の控え(本人の端末の images.js が古くても、種類を消した後でも表示できるようにする)
+    // label / image は送信時の見た目の控え(種類を消した後でも、本人の画面で同じように表示できるようにする)
     var row = { id: env.uuid(), date: isDateStr(req.date) ? req.date : env.today(), from_name: device.name, type: req.type,
       message: toStr(req.message).slice(0, 200), seen: 0, created_at: env.now(),
       label: toStr(req.label).slice(0, 30), image: toStr(req.image).slice(0, 300) };
@@ -645,7 +813,7 @@ var Core = (function () {
     }
     for (var k in s) {
       if (!(k in DEFAULT_SETTINGS) || PROTECTED_SETTINGS[k]) continue;
-      setSetting(store, k, toStr(s[k]));
+      setSetting(store, k, toStr(s[k]).slice(0, 2000));
     }
     return { ok: true, settings: getSettings(store) };
   };
@@ -656,24 +824,82 @@ var Core = (function () {
     if (daysBetween(from, to) > 400) throw fail('bad_request', '期間が長すぎます');
     return {
       ok: true, from: from, to: to,
-      logs: logsBetween(store, from, to), meds: medsBetween(store, from, to),
-      health: healthBetween(store, from, to), memos: memosBetween(store, from, to),
+      obs: obsBetween(store, from, to), health: healthBetween(store, from, to), memos: memosBetween(store, from, to),
       settings: getSettings(store)
     };
   };
 
   actions.createKey = function (req, store, env, device) {
-    requireRole(device, ['supporter']);
     var token = env.randomToken();
     var now = env.now();
     store.insert('devices', { id: env.uuid(), token_hash: env.sha256(token), role: 'health', name: toStr(req.name) || 'ヘルスケア連携', created_at: now, last_seen: now });
     return { ok: true, token: token };
   };
 
-  // 役割ごとに許可するアクション。health(ショートカットの連携キー)は健康データを送ることしかできない
+  // ---------- 画像(サイトから登録したもの。スプレッドシートの image シートに入る) ----------
+  actions.getImage = function (req, store, env, device) {
+    var id = toStr(req.id);
+    if (!/^[A-Za-z0-9-]{8,64}$/.test(id)) throw fail('bad_request', 'id が不正です');
+    var r = store.find ? store.find('image', 'id', id) : findOne(store.all('image'), 'id', id);
+    if (!r || truthy(r.deleted)) throw fail('not_found', '画像が見つかりません');
+    var b64 = '';
+    for (var i = 0; i < IMAGE_PARTS; i++) b64 += toStr(r['d' + i]).replace(/^~/, '');
+    return { ok: true, id: id, mime: toStr(r.mime), data: 'data:' + toStr(r.mime) + ';base64,' + b64 };
+  };
+
+  actions.uploadImage = function (req, store, env, device) {
+    var m = /^data:(image\/(?:png|jpeg|webp|gif));base64,([A-Za-z0-9+\/]+=*)$/.exec(toStr(req.data));
+    if (!m) throw fail('bad_request', '画像の形式が読めません(PNG・JPEG・WebP・GIF)');
+    var b64 = m[2];
+    if (b64.length > IMAGE_PARTS * IMAGE_CHUNK) throw fail('too_large', '画像が大きすぎます(約 300KB まで)');
+    if (imageMeta(store).length >= 100) throw fail('too_many', '登録できる画像は 100 枚までです。使っていない画像を消してください');
+    var row = { id: env.uuid(), name: toStr(req.name).trim().slice(0, 30) || '画像', mime: m[1],
+      w: toInt(req.w), h: toInt(req.h), created_at: env.now(), deleted: 0 };
+    for (var i = 0; i < IMAGE_PARTS; i++) {
+      var c = b64.slice(i * IMAGE_CHUNK, (i + 1) * IMAGE_CHUNK);
+      row['d' + i] = c ? '~' + c : ''; // 先頭の ~ は、+ や = で始まる文字を数式と間違えさせないための印
+    }
+    store.insert('image', row);
+    return { ok: true, image: normImageMeta(row) };
+  };
+
+  actions.deleteImage = function (req, store, env, device) {
+    var id = toStr(req.id);
+    var patch = { deleted: 1 };
+    for (var i = 0; i < IMAGE_PARTS; i++) patch['d' + i] = '';
+    if (!id || !store.update('image', 'id', id, patch)) throw fail('not_found', '画像が見つかりません');
+    return { ok: true };
+  };
+
+  // 画面のどこにどの画像を出すか(slots)と、リアクションの種類(reactions)
+  actions.saveImageConfig = function (req, store, env, device) {
+    var c = req.config || {};
+    var out = {};
+    if (c.slots && typeof c.slots === 'object') {
+      out.slots = {};
+      SLOT_KEYS.forEach(function (k) { if (typeof c.slots[k] === 'string') out.slots[k] = c.slots[k].slice(0, 80); });
+    }
+    if (Array.isArray(c.reactions)) {
+      var seen = {};
+      out.reactions = c.reactions.filter(function (r) {
+        if (!r || !isReactionType(r.id) || seen[r.id]) return false;
+        seen[r.id] = 1;
+        return true;
+      }).slice(0, 40).map(function (r) {
+        return { id: String(r.id), label: toStr(r.label).trim().slice(0, 30) || String(r.id), image: toStr(r.image).slice(0, 80) };
+      });
+    }
+    setSetting(store, 'image_config', JSON.stringify(out));
+    return { ok: true, settings: getSettings(store) };
+  };
+
+  // 役割ごとに許可するアクション。
+  // patient(本人): くまの部屋を見る・ひとことに「ありがとう」・連携の同意だけ。記録は読めない
+  // health(ショートカットの連携キー): 健康データを送ることだけ
   var ALLOW = {
-    patient:   ['me', 'state', 'saveLog', 'addMed', 'updateMed', 'deleteMed', 'addMemo', 'deleteMemo', 'health', 'seenReactions', 'getSettings', 'saveSettings', 'report', 'consentHealth'],
-    supporter: ['me', 'state', 'saveLog', 'addMed', 'updateMed', 'deleteMed', 'addMemo', 'deleteMemo', 'health', 'react', 'reactions', 'seenReactions', 'getSettings', 'saveSettings', 'report', 'createKey'],
+    patient:   ['me', 'room', 'seenReactions', 'consentHealth', 'getImage'],
+    supporter: ['me', 'state', 'saveObs', 'addMemo', 'deleteMemo', 'react', 'reactions', 'getSettings', 'saveSettings', 'report',
+                'createKey', 'consentHealth', 'getImage', 'uploadImage', 'deleteImage', 'saveImageConfig'],
     health:    ['health']
   };
 
@@ -692,5 +918,5 @@ var Core = (function () {
     }
   }
 
-  return { TABLES: TABLES, DEFAULT_SETTINGS: DEFAULT_SETTINGS, handle: handle, addDays: addDays, aggregateSamples: aggregateSamples };
+  return { VERSION: VERSION, TABLES: TABLES, DEFAULT_SETTINGS: DEFAULT_SETTINGS, handle: handle, addDays: addDays, summarizeNight: summarizeNight };
 })();

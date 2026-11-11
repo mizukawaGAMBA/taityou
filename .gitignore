@@ -1,0 +1,13 @@
+node_modules/
+.playwright-mcp/
+dev/data.json
+# 家族の相談記録と設計メモ(病名・薬・名前を含む)。公開リポジトリには絶対に上げない
+private/
+*.log
+# PC で試すための開発用ファイル。GitHub には上げない(画面と API だけを公開する)
+dev/
+# Apps Script とつなぐ設定(このパソコンだけで使う)
+.clasp.json
+.clasprc.json
+# VS Code などの設定
+.vscode/

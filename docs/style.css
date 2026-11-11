@@ -277,8 +277,48 @@ canvas.confetti { position: fixed; inset: 0; pointer-events: none; z-index: 55; 
 .role-grid .btn { min-height: 72px; flex-direction: column; gap: 2px; background: var(--card); box-shadow: var(--shadow); }
 .role-grid .btn.sel { border: 3px solid var(--brand); }
 
+/* ---------- 観察の記録(記録する人) ---------- */
+.obs-field { margin-bottom: 16px; }
+.obs-field:last-child { margin-bottom: 0; }
+.obs-label { font-size: 0.9rem; color: var(--ink-2); font-weight: 600; margin-bottom: 6px; }
+.chips { display: flex; flex-wrap: wrap; gap: 8px; }
+.chip-btn { min-height: 48px; padding: 8px 14px; border-radius: 14px; background: var(--bg); border: 2px solid var(--line); font-weight: 700; font-size: 0.98rem; color: var(--ink); }
+.chip-btn.sel { background: var(--honey-soft); border-color: var(--honey-dark); }
+.chip-btn:active { transform: scale(0.97); }
+.stepper { display: flex; align-items: center; gap: 14px; }
+.stepper b { min-width: 3.5em; text-align: center; font-size: 1.1rem; }
+.stepper .chip-btn { width: 52px; font-size: 1.3rem; padding: 0; }
+.inline-time { display: flex; align-items: center; gap: 10px; margin-top: 8px; font-size: 0.85rem; color: var(--ink-2); }
+.inline-time input { max-width: 150px; min-height: 44px; }
+.progress-line { color: var(--ink-2); margin: -4px 0 12px; text-align: center; }
+
+/* ---------- 本人の画面(くまの部屋) ---------- */
+.card.room { display: flex; flex-direction: column; align-items: center; gap: 18px; padding: 26px 18px 22px; text-align: center; }
+.card.room .pic { width: 200px; height: 200px; }
+.bear-btn { display: block; border-radius: 50%; }
+.bear-btn.bear-pat .pic { animation: pat 0.5s ease; }
+@keyframes pat { 0% { transform: scale(1); } 40% { transform: scale(1.08) rotate(-3deg); } 100% { transform: scale(1); } }
+.card.room .bubble { width: 100%; font-size: 1.1rem; text-align: left; }
+.card.room .bubble::before { left: 50%; top: -16px; margin-left: -8px; border-right-color: transparent; border-bottom-color: var(--honey-soft); }
+.card.room .bubble.reaction::before { border-right-color: transparent; border-bottom-color: var(--pink-soft); }
+
+/* ---------- くまタブ(ひとこと・画像) ---------- */
+.sent-list { list-style: none; margin: 14px 0 0; padding: 0; display: grid; gap: 8px; }
+.sent-list li { display: flex; align-items: center; gap: 10px; background: var(--bg); border-radius: 12px; padding: 8px 10px; font-size: 0.92rem; }
+.sent-list .rimg { width: 32px; height: 32px; object-fit: contain; }
+.sent-list .remoji { font-size: 1.4rem; }
+button.cell { border: 2px solid transparent; min-height: 84px; }
+.img-grid .cell.sel { border-color: var(--honey-dark); background: var(--honey-soft); }
+.img-grid .cell.add { color: var(--brand); }
+.upload-btn { position: relative; overflow: hidden; }
+.upload-btn input { position: absolute; inset: 0; opacity: 0; width: 100%; height: 100%; cursor: pointer; }
+.react-preview { display: flex; align-items: center; gap: 12px; background: var(--pink-soft); border-radius: 14px; padding: 10px 14px; margin-bottom: 12px; }
+.react-preview .rimg { width: 44px; height: 44px; object-fit: contain; }
+.react-preview .remoji { font-size: 1.8rem; }
+.pic.big-preview { width: 180px; height: 180px; margin: 0 auto; }
+
 @media (prefers-reduced-motion: reduce) {
-  .bear-bob, .bear-cheer, .rare-badge { animation: none; }
+  .bear-bob, .bear-cheer, .rare-badge, .bear-btn.bear-pat .pic { animation: none; }
   .wizard, .sheet, .sheet-bg, .toast { animation: none; }
 }
 @media (min-width: 600px) {
