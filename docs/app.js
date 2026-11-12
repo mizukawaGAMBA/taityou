@@ -59,7 +59,7 @@
     gait:     { label: '歩き方のふらつき', opts: [[0, 'なし'], [1, '少し'], [2, '目立つ']] },
     lying:    { label: '横になっていた時間', opts: [[0, 'ほとんどなし'], [1, '2〜3時間'], [2, '半日くらい'], [3, 'ほぼ一日']] },
     outing:   { label: '外出', opts: [[2, '外出できた'], [1, '近所だけ'], [0, 'なし']] },
-    meal:     { label: '食事の量', opts: [[3, 'ふつう'], [2, '半分くらい'], [1, '少し'], [0, 'ほぼ食べず']] },
+    meal:     { label: '食事の量', opts: [[4, 'よく食べた'], [3, 'ふつう'], [2, '半分くらい'], [1, '少し'], [0, 'ほぼ食べず']] },
     movement: { label: '不随意運動の見た目', opts: [[1, 'ほぼなし'], [2, '少し'], [3, '中くらい'], [4, '強い'], [5, 'とても強い']] },
     alcohol:  { label: 'アルコール', opts: [[0, 'なし'], [1, 'あり']] }
   };
@@ -126,6 +126,7 @@
   })();
   const settingsNow = () => (cache && cache.settings) || {};
   const appTitle = () => String(settingsNow().app_title || '').trim() || 'くまの記録';
+  const startDate = (s) => (/^\d{4}-\d{2}-\d{2}$/.test(String((s || settingsNow()).start_date || '')) ? (s || settingsNow()).start_date : '');
   function siteConfig() {
     const raw = settingsNow().image_config;
     if (!raw) return {};
@@ -513,7 +514,8 @@
 
   function viewRecord(data) {
     const today = logicalToday();
-    const nav = `<div class="row" style="margin-bottom:12px"><button class="btn outline" style="width:auto;min-height:48px" data-act="date" data-delta="-1" aria-label="前の日">◀</button>
+    const sd = startDate();
+    const nav = `<div class="row" style="margin-bottom:12px"><button class="btn outline" style="width:auto;min-height:48px" data-act="date" data-delta="-1" aria-label="前の日" ${sd && curDate <= sd ? 'disabled' : ''}>◀</button>
       <div class="spacer center"><b>${jpDate(curDate)}</b>${curDate === today ? '<span class="chip" style="margin-left:6px">きょう</span>' : ''}</div>
       <button class="btn outline" style="width:auto;min-height:48px" data-act="date" data-delta="1" aria-label="次の日" ${curDate >= today ? 'disabled' : ''}>▶</button></div>`;
     if (!data) return nav + `<div class="card center muted">読み込んでいます…</div>`;
@@ -523,7 +525,9 @@
     let progress = '';
     if (pr) {
       const left = s.next_appointment ? daysBetween(curDate, s.next_appointment) : null;
-      progress = `<p class="progress-line small">${s.last_appointment ? `前回の診察(${jpShort(pr.since)})から` : `${jpShort(pr.since)}から`} 記録 <b>${pr.recorded}日</b> / ${pr.days}日${left != null ? `<br>次の診察まで <b>${left >= 0 ? left + '日' : '過ぎています'}</b>` : ''}</p>`;
+      const fromLabel = s.last_appointment && pr.since === s.last_appointment ? `前回の診察(${jpShort(pr.since)})から`
+        : pr.since === startDate(s) ? `記録の開始日(${jpShort(pr.since)})から` : `${jpShort(pr.since)}から`;
+      progress = `<p class="progress-line small">${fromLabel} 記録 <b>${pr.recorded}日</b> / ${pr.days}日${left != null ? `<br>次の診察まで <b>${left >= 0 ? left + '日' : '過ぎています'}</b>` : ''}</p>`;
     }
     const wake = `<div class="obs-field"><div class="obs-label">起きてきた時刻</div><div class="row">
         ${hmInput('data-obs-hm="wake_time" style="max-width:150px" aria-label="起きてきた時刻(4桁)"', o.wake_time)}
@@ -601,7 +605,8 @@
   function viewList() {
     if (!listData) { loadList(); return `<div class="card center muted">読み込んでいます…</div>`; }
     const byDate = {};
-    for (let i = 0; i < 14; i++) { const d = addDays(listData.to, -i); byDate[d] = { date: d, memos: 0 }; }
+    const sdl = startDate(listData.settings);
+    for (let i = 0; i < 14; i++) { const d = addDays(listData.to, -i); if (!sdl || d >= sdl) byDate[d] = { date: d, memos: 0 }; }
     listData.obs.forEach((o) => { if (byDate[o.date]) byDate[o.date].obs = o; });
     listData.health.forEach((h) => { if (byDate[h.date]) byDate[h.date].health = h; });
     listData.memos.forEach((m) => { if (byDate[m.date]) byDate[m.date].memos++; });
@@ -620,7 +625,8 @@
         <td class="num">${sl}</td></tr>`;
     }).join('');
     const s = listData.settings;
-    const from = s.last_appointment || addDays(listData.to, -41);
+    let from = s.last_appointment || addDays(listData.to, -41);
+    if (startDate(s) && from < startDate(s)) from = startDate(s);
     return `<section class="card"><h2>直近14日 <span class="link">タップで開く</span></h2>
       <table class="list"><thead><tr><th>日付</th><th>見た目</th><th>起上</th><th>ふらつき</th><th>外出</th><th>薬 朝/夜</th><th>睡眠</th></tr></thead><tbody>${rows}</tbody></table>
       <p class="help">見た目 = 不随意運動 1〜5 / 起上・ふらつき: ○ なし・スムーズ △ 少し × 目立つ・つらそう / 外出: 外 外出 近 近所 / 薬: ● 全部・飲んだ ◐ ${esc(medName(listData.settings || {}))}以外 ◔ 一部 ○ 飲まなかった</p></section>
@@ -667,6 +673,7 @@
       ${f('app_title', 'アプリのタイトル', 'text', 'この画面(記録する人)のいちばん上に出ます。本人の画面には出ません。空欄なら「くまの記録」', '例: くまの記録')}
       ${f('patient_name', '本人の名前', 'text', 'レポートに印字します(空欄でも可)')}
       ${f('supporter_name', '記録する人の名前', 'text', '本人の同意の画面に「届く先: ○○さん」と出ます')}
+      ${f('start_date', '記録の開始日', 'date', 'この日より前は、記録・一覧・レポートに出ません')}
       ${f('med2_label', '朝の薬で分けて書く薬の名前', 'text', '朝の薬のボタン(「○○全部飲んだ」「○○一部飲んだ」「○○以外飲んだ」)の○○に出ます。名前はスプレッドシートにだけ保存され、GitHub には出ません', '例: お薬の名前')}
       <div class="row"><div style="flex:1">${f('last_appointment', '前回の診察日', 'date')}</div><div style="flex:1">${f('next_appointment', '次の診察日', 'date')}</div></div>
       <label class="field"><span>先生に伝えたいこと</span><textarea name="report_note" maxlength="2000" placeholder="例: 本人に症状を尋ねると痛みが強くなるため、家族の観察で記録しています。">${esc(s.report_note || '')}</textarea><div class="help">レポートのいちばん上に印刷されます。</div></label>
@@ -720,8 +727,14 @@
         <li><b>本人の iPhone で同意してもらい、ショートカットを入れる</b>
           <span class="help">本人の iPhone で「本人」としてログイン → 右上の ⚙︎ →「眠りと歩数の連携」。本人が説明を読んで「同意」を押します(SHORTCUTS.md の 5)。</span></li>
         <li><b>本人の iPhone に「自動で送る」設定を作る</b>
-          <span class="help">本人がよく開くアプリ(LINE など)を開いた時に、裏で送られるようにします(SHORTCUTS.md の 6)。</span></li>
+          <span class="help">本人がよく開くアプリ(LINE など)を開いた時に、裏で送られるようにします(SHORTCUTS.md の 6)。何度開いても、実際に送るのは下の回数だけです。</span></li>
       </ol>
+      <label class="field" style="margin-top:14px"><span>自動で送る回数</span>
+        <select data-setting="health_per_day">
+          <option value="2" ${s.health_per_day !== '1' ? 'selected' : ''}>1日2回(朝4時〜と夕方4時〜に1回ずつ)</option>
+          <option value="1" ${s.health_per_day === '1' ? 'selected' : ''}>1日1回(朝4時を過ぎて最初の1回)</option>
+        </select>
+        <div class="help">本人の iPhone の設定を変えずに、ここで変えられます。歩数はその日の途中の数で届き、翌日の送信で1日分にそろいます。</div></label>
       ${hl.consent ? '<button class="btn danger" data-act="health-stop" style="margin-top:14px">連携を止める</button>' : ''}
       <p class="help">API の URL: <code style="word-break:break-all">${esc(cfg.apiUrl)}</code></p></section>`;
   }
@@ -740,9 +753,10 @@
     return wrapSheet(`<h3>連携キー</h3>
       <p class="small">この画面を閉じると二度と表示されません。ショートカットに貼り付けてから閉じてください。</p>
       <label class="field" style="margin-top:12px"><span>連携キー</span><input type="text" id="key-token" value="${esc(sheet.token)}" readonly></label>
-      <label class="field"><span>送信先URL</span><input type="text" value="${esc(cfg.apiUrl)}" readonly></label>
-      <p class="help">このキーを、ショートカットの「URLの内容を取得」の <b>token</b> の欄に貼ります(SHORTCUTS.md の 2)。</p>
-      <div class="actions"><button class="btn" data-act="copy" data-target="key-token">キーをコピー</button><button class="btn ghost" data-act="sheet-close">閉じる</button></div>`);
+      <label class="field"><span>送信先URL</span><input type="text" id="api-url" value="${esc(cfg.apiUrl)}" readonly></label>
+      <label class="field"><span>確認用URL(ショートカットの ⓪ に貼る)</span><input type="text" id="need-url" value="${esc(cfg.apiUrl + '?action=need&token=' + sheet.token)}" readonly></label>
+      <p class="help">キーはショートカットの ⑨「URLの内容を取得」の <b>token</b> の欄に、確認用URLは ⓪「URLの内容を取得」の URL の欄に貼ります(SHORTCUTS.md の 2)。</p>
+      <div class="actions"><button class="btn" data-act="copy" data-target="key-token">キーをコピー</button><button class="btn" data-act="copy" data-target="need-url">確認用URLをコピー</button><button class="btn" data-act="copy" data-target="api-url">送信先URLをコピー</button><button class="btn ghost" data-act="sheet-close">閉じる</button></div>`);
   }
 
   // 本人の端末の設定(歯車)
@@ -912,7 +926,7 @@
   function saveSettings(form) {
     const f = new FormData(form);
     const settings = {};
-    ['app_title', 'patient_name', 'supporter_name', 'med2_label', 'last_appointment', 'next_appointment', 'report_note'].forEach((k) => { settings[k] = String(f.get(k) || '').trim().slice(0, k === 'report_note' ? 2000 : 40); });
+    ['app_title', 'start_date', 'patient_name', 'supporter_name', 'med2_label', 'last_appointment', 'next_appointment', 'report_note'].forEach((k) => { settings[k] = String(f.get(k) || '').trim().slice(0, k === 'report_note' ? 2000 : 40); });
     enqueue({ action: 'saveSettings', settings }, (c) => { c.settings = Object.assign({}, c.settings, settings); });
     listData = null;
     toast('設定を保存しました');
@@ -1198,7 +1212,11 @@
       case 'refresh': sheet = null; renderOverlay(); refresh(); toast('更新しています…'); break;
       case 'logout': if (confirm('ログアウトしますか？(送信済みの記録は消えません)')) logout(); break;
       case 'tab': tab = el.dataset.tab; if (tab === 'list') listData = null; render(); break;
-      case 'date': curDate = addDays(curDate, parseInt(el.dataset.delta, 10)); cache = null; render(); break;
+      case 'date': {
+        const next = addDays(curDate, parseInt(el.dataset.delta, 10));
+        if (startDate() && next < startDate()) break; // 記録の開始日より前には戻らない
+        curDate = next; cache = null; render(); break;
+      }
       case 'goto-date': curDate = el.dataset.date; tab = 'today'; cache = null; render(); window.scrollTo(0, 0); break;
       case 'react': react(el.dataset.type); break;
       case 'slot-pick': sheet = { type: 'slot', slot: el.dataset.slot }; renderOverlay(); break;
@@ -1233,6 +1251,12 @@
       return;
     }
     if (t.dataset && t.dataset.obs) { saveObs({ [t.dataset.obs]: t.value.trim() }); return; }
+    if (t.dataset && t.dataset.setting) {
+      const settings = { [t.dataset.setting]: t.value };
+      enqueue({ action: 'saveSettings', settings }, (c) => { c.settings = Object.assign({}, c.settings, settings); });
+      toast('保存しました');
+      return;
+    }
     if (t.dataset && t.dataset.obsHm) {
       const hm = parseHm(t.value);
       if (hm === null) { toast('時刻は4桁の数字で入れてください(例: 0730)'); t.value = String(obsNow()[t.dataset.obsHm] || '').replace(':', ''); return; }

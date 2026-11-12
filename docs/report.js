@@ -24,7 +24,7 @@
     gait:   { label: '歩き方のふらつき', names: ['なし', '少し', '目立つ'], order: [0, 1, 2], sym: ['○', '△', '×'] },
     lying:  { label: '横になっていた時間', names: ['ほとんどなし', '2〜3時間', '半日くらい', 'ほぼ一日'], order: [0, 1, 2, 3], sym: ['少', '2-3h', '半日', '一日'] },
     outing: { label: '外出', names: ['なし', '近所だけ', '外出できた'], order: [2, 1, 0], sym: ['–', '近', '外'] },
-    meal:   { label: '食事の量', names: ['ほぼ食べず', '少し', '半分くらい', 'ふつう'], order: [3, 2, 1, 0], sym: ['×', '少', '半', '普'] }
+    meal:   { label: '食事の量', names: ['ほぼ食べず', '少し', '半分くらい', 'ふつう', 'よく食べた'], order: [4, 3, 2, 1, 0], sym: ['×', '少', '半', '普', '多'] }
   };
   const MOVE = { 1: 'ほぼなし', 2: '少し', 3: '中くらい', 4: '強い', 5: 'とても強い' };
   const EASY = [['morning', '朝'], ['noon', '昼'], ['evening', '夕方'], ['night', '夜']];
@@ -59,6 +59,7 @@
     let data;
     try { data = await api({ action: 'report', from, to }); } catch (e) { page.innerHTML = '<p class="empty">通信できませんでした。</p>'; return; }
     if (!data.ok) { page.innerHTML = `<p class="empty">${esc(data.error === 'forbidden' ? 'レポートは「記録する人」のログインで開きます。' : (data.message || data.error))}</p>`; return; }
+    fromEl.value = data.from; toEl.value = data.to; // 記録の開始日より前は出さない(サーバーが期間を直す)
     render(data);
   }
 
@@ -170,7 +171,7 @@
         <td class="num">${d.health && d.health.awakenings != null ? d.health.awakenings : ''}</td>
         <td class="num">${d.health && d.health.steps != null ? Number(d.health.steps).toLocaleString() : ''}</td></tr>`).join('')}
     </tbody></table>
-    <p class="leg">起上・ふら(ふらつき): ○ スムーズ/なし △ ゆっくり/少し × つらそう/目立つ ／ 横 = 横になっていた時間 ／ 外出: 外 外出できた 近 近所だけ – なし ／ 仕事等: 出 会社出勤 残 残業 習 習い事 バ バレエ ／ 食事: 普 ふつう 半 半分くらい 少 少し × ほぼ食べず(+間 = 寝る前の間食あり) ／ 見た目 = 不随意運動 1〜5 ／ 朝の薬: ● ${esc(mn)}全部 ◔ ${esc(mn)}一部 ◐ ${esc(mn)}以外 ／ 寝る前の薬: ● 飲んだ ◔ 一部 ○ 飲まなかった(空欄は記録なし。小さな数字は飲んだ時刻) ／ 目覚 = 5分以上目が覚めた回数</p>`;
+    <p class="leg">起上・ふら(ふらつき): ○ スムーズ/なし △ ゆっくり/少し × つらそう/目立つ ／ 横 = 横になっていた時間 ／ 外出: 外 外出できた 近 近所だけ – なし ／ 仕事等: 出 会社出勤 残 残業 習 習い事 バ バレエ ／ 食事: 多 よく食べた 普 ふつう 半 半分くらい 少 少し × ほぼ食べず(+間 = 寝る前の間食あり) ／ 見た目 = 不随意運動 1〜5 ／ 朝の薬: ● ${esc(mn)}全部 ◔ ${esc(mn)}一部 ◐ ${esc(mn)}以外 ／ 寝る前の薬: ● 飲んだ ◔ 一部 ○ 飲まなかった(空欄は記録なし。小さな数字は飲んだ時刻) ／ 目覚 = 5分以上目が覚めた回数</p>`;
 
     page.innerHTML = header + note + summary +
       `<h2>日ごとの推移</h2><div class="avoid">${chart1}</div><div class="avoid" style="margin-top:8px">${chart2}</div><div class="avoid" style="margin-top:8px">${chart3}</div>` +

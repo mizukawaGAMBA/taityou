@@ -73,6 +73,11 @@ function doGet(e) {
   var req = {};
   Object.keys(p).forEach(function (k) { req[k] = p[k]; });
   if (p.payload) { try { Object.assign(req, JSON.parse(p.payload)); } catch (err) { /* 無視 */ } }
+  if (p.action === 'need') {
+    // ショートカットの最初の確認: いま眠りと歩数を送る必要があるか(1 日 1〜2 回にするため)
+    var r = handleRequest(req);
+    return ContentService.createTextOutput(r && r.ok ? r.send : 'yes').setMimeType(ContentService.MimeType.TEXT);
+  }
   return respond(handleRequest(req));
 }
 
@@ -268,7 +273,7 @@ function toCell(v) {
  * 日付は「論理日」(午前4時区切り)の "YYYY-MM-DD" 文字列。時刻は "HH:MM"。
  * ===================================================================== */
 var Core = (function () {
-  var VERSION = 6;
+  var VERSION = 7;
   var IMAGE_PARTS = 10;       // 1 枚の画像を最大 10 個のセルに分けて入れる
   var IMAGE_CHUNK = 40000;    // 1 セルに入れる文字数(セルの上限は 50,000 文字)
   var IMAGE_META_COLS = 7;    // 画像の表の、データ以外の列の数
@@ -303,6 +308,8 @@ var Core = (function () {
     last_appointment: '',
     report_note: '',                       // レポートの最初に印刷する、家族から先生へのひとこと
     card_order: '',                        // 記録画面のカテゴリーの並び順(カンマ区切り。空なら最初の並び)
+    start_date: '2026-10-31',              // 記録の正式な開始日。これより前の日は記録・表示しない
+    health_per_day: '2',                   // 眠りと歩数を自動で送る回数(1 = 朝4時以降に1回、2 = 朝4時〜と夕方4時〜に1回ずつ)
     health_shortcut_url: '',               // サポーターが作って共有したショートカットの iCloud リンク
     health_shortcut_name: 'くまヘルス送信', // そのショートカットの名前(アプリから試しに実行するのに使う)
     health_consent: '0',                   // 本人の同意(1 = 同意している)。同意できるのは本人の端末だけ
@@ -321,7 +328,7 @@ var Core = (function () {
   var PATIENT_SETTINGS = ['supporter_name', 'health_shortcut_url', 'health_shortcut_name', 'health_consent', 'health_consent_at', 'health_last_at', 'image_config'];
 
   // 観察の項目。数字の範囲は [最小, 最大]
-  var OBS_SCALES = { getup: [0, 2], gait: [0, 2], lying: [0, 3], outing: [0, 2], meal: [0, 3], movement: [1, 5], alcohol: [0, 1], night_snack: [0, 1] };
+  var OBS_SCALES = { getup: [0, 2], gait: [0, 2], lying: [0, 3], outing: [0, 2], meal: [0, 4], movement: [1, 5], alcohol: [0, 1], night_snack: [0, 1] };
   var OBS_SETS = { easy_times: ['morning', 'noon', 'evening', 'night'], complaint: ['pain', 'dizzy', 'other'],
     activity: ['work', 'overtime', 'lesson', 'ballet'] };
   // 備考: good_note = 楽そうだった時間・できたこと、complaint_note = 見た目と本人のことば、ほかはカテゴリーの名前どおり
@@ -457,6 +464,13 @@ var Core = (function () {
   function imageMeta(store) {
     var rows = store.head ? store.head('image', IMAGE_META_COLS) : store.all('image');
     return rows.map(normImageMeta).filter(function (r) { return r.id && !r.deleted; });
+  }
+  function startDate(s) { return isDateStr(s.start_date) ? s.start_date : ''; }
+  // 自動送信の「区切り」: 午前4時を日の境目にし、1日2回なら 4時〜16時 と 16時〜翌4時 に分ける
+  function slotKey(ms, perDay) {
+    var d = new Date(ms - 4 * 3600000);
+    var key = d.getFullYear() + '-' + pad2(d.getMonth() + 1) + '-' + pad2(d.getDate());
+    return perDay === 2 ? key + (d.getHours() < 12 ? 'A' : 'B') : key;
   }
   function findOne(list, field, value) {
     for (var i = 0; i < list.length; i++) if (list[i][field] === value) return list[i];
@@ -642,6 +656,9 @@ var Core = (function () {
     var s = getSettings(store);
     var all = store.all('observe').map(normObs);
     var since = isDateStr(s.last_appointment) && s.last_appointment <= date ? s.last_appointment : addDays(date, -27);
+    var sd = startDate(s);
+    if (sd && since < sd) since = sd;
+    if (since > date) since = date;
     var recorded = all.filter(function (r) { return r.date >= since && r.date <= date && hasObs(r); }).length;
     var sent = store.all('reaction').map(normReaction).sort(function (a, b) { return a.created_at < b.created_at ? 1 : -1; }).slice(0, 5);
     return {
@@ -658,6 +675,8 @@ var Core = (function () {
   actions.saveObs = function (req, store, env, device) {
     if (!isDateStr(req.date)) throw fail('bad_request', 'date が必要です');
     if (req.date > env.today()) throw fail('bad_request', '先の日付には記録できません');
+    var sd = startDate(getSettings(store));
+    if (sd && req.date < sd) throw fail('bad_request', '記録の開始日(' + md(sd) + ')より前の日には記録できません');
     var existing = findOne(store.all('observe').map(normObs), 'date', req.date);
     var row = existing ? existing : normObs({ date: req.date });
     var changed = false;
@@ -726,7 +745,8 @@ var Core = (function () {
     var oldest = addDays(today, -31);
     var patches = {};
     function patchFor(d) { if (!patches[d]) patches[d] = {}; return patches[d]; }
-    function inRange(d) { return d >= oldest && d <= today; }
+    var sd = startDate(getSettings(store));
+    function inRange(d) { return d >= oldest && d <= today && (!sd || d >= sd); }
 
     var nights = {};
     sleepSamplesFrom(req).forEach(function (s) {
@@ -785,6 +805,17 @@ var Core = (function () {
     return { ok: true, dates: saved, message: summary + ' を受け取りました' };
   };
 
+  // ショートカットの最初の確認。同じ「区切り」の中ですでに受け取っていれば "no"(送らなくてよい)
+  // 同意の前(試しの送信)と、まだ一度も受け取っていない時は、いつでも "yes"
+  actions.need = function (req, store, env, device) {
+    var s = getSettings(store);
+    if (s.health_consent !== '1' || !s.health_last_at) return { ok: true, send: 'yes' };
+    var last = Date.parse(s.health_last_at);
+    if (isNaN(last)) return { ok: true, send: 'yes' };
+    var per = s.health_per_day === '1' ? 1 : 2;
+    return { ok: true, send: slotKey(Date.parse(env.now()), per) === slotKey(last, per) ? 'no' : 'yes' };
+  };
+
   // ヘルスケア連携の同意(agree: 1)と取り消し(agree: 0)。同意できるのは本人の端末だけ。止めるのは家族もできる
   actions.consentHealth = function (req, store, env, device) {
     var agree = truthy(req.agree);
@@ -840,6 +871,9 @@ var Core = (function () {
   actions.report = function (req, store, env, device) {
     var to = isDateStr(req.to) ? req.to : env.today();
     var from = isDateStr(req.from) ? req.from : addDays(to, -41);
+    var sd = startDate(getSettings(store));
+    if (sd && from < sd) from = sd;
+    if (from > to) from = to;
     if (daysBetween(from, to) > 400) throw fail('bad_request', '期間が長すぎます');
     return {
       ok: true, from: from, to: to,
@@ -919,7 +953,7 @@ var Core = (function () {
     patient:   ['me', 'room', 'seenReactions', 'consentHealth', 'getImage'],
     supporter: ['me', 'state', 'saveObs', 'addMemo', 'deleteMemo', 'react', 'reactions', 'getSettings', 'saveSettings', 'report',
                 'createKey', 'consentHealth', 'getImage', 'uploadImage', 'deleteImage', 'saveImageConfig'],
-    health:    ['health']
+    health:    ['health', 'need']
   };
 
   function handle(req, store, env) {
