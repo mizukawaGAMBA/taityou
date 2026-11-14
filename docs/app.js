@@ -505,7 +505,8 @@
       `<button class="chip-btn ${cur === v ? 'sel' : ''}" data-act="obs" data-f="${key}" data-v="${v}" aria-pressed="${cur === v}">${l}</button>`).join('')}${extra || ''}</div></div>`;
   }
   // カテゴリーごとの備考欄(入力し終わって欄から離れた時に保存)
-  const noteField = (o, key, ph) => `<label class="field note-field"><span>備考</span><textarea class="note" data-obs="${key}" maxlength="500" rows="2" placeholder="${esc(ph)}">${esc(o[key] || '')}</textarea></label>`;
+  const noteField = (o, key, ph, label) => `<label class="note-field"><span>${label || '備考'}</span><textarea class="note" data-obs="${key}" maxlength="500" rows="1" placeholder="${esc(ph)}">${esc(o[key] || '')}</textarea></label>`;
+  const fitNote = (t) => { t.style.height = 'auto'; t.style.height = (t.scrollHeight + 4) + 'px'; }; // 書いた分だけ欄を伸ばす
   function setChips(key, opts, cur) {
     const sel = new Set(String(cur || '').split(',').filter(Boolean));
     return `<div class="chips">${opts.map(([v, l]) =>
@@ -515,9 +516,9 @@
   function viewRecord(data) {
     const today = logicalToday();
     const sd = startDate();
-    const nav = `<div class="row" style="margin-bottom:12px"><button class="btn outline" style="width:auto;min-height:48px" data-act="date" data-delta="-1" aria-label="前の日" ${sd && curDate <= sd ? 'disabled' : ''}>◀</button>
-      <div class="spacer center"><b>${jpDate(curDate)}</b>${curDate === today ? '<span class="chip" style="margin-left:6px">きょう</span>' : ''}</div>
-      <button class="btn outline" style="width:auto;min-height:48px" data-act="date" data-delta="1" aria-label="次の日" ${curDate >= today ? 'disabled' : ''}>▶</button></div>`;
+    const nav = `<div class="row date-nav"><button class="btn outline nav-btn" data-act="date" data-delta="-1" aria-label="前の日" ${sd && curDate <= sd ? 'disabled' : ''}>◀</button>
+      <button class="date-btn spacer" data-act="cal-open" aria-label="カレンダーから日付を選ぶ"><span class="cal-ico" aria-hidden="true">📅</span><b>${jpDate(curDate)}</b>${curDate === today ? '<span class="chip">きょう</span>' : ''}</button>
+      <button class="btn outline nav-btn" data-act="date" data-delta="1" aria-label="次の日" ${curDate >= today ? 'disabled' : ''}>▶</button></div>`;
     if (!data) return nav + `<div class="card center muted">読み込んでいます…</div>`;
     const o = data.obs || {};
     const s = data.settings || {};
@@ -530,8 +531,8 @@
       progress = `<p class="progress-line small">${fromLabel} 記録 <b>${pr.recorded}日</b> / ${pr.days}日${left != null ? `<br>次の診察まで <b>${left >= 0 ? left + '日' : '過ぎています'}</b>` : ''}</p>`;
     }
     const wake = `<div class="obs-field"><div class="obs-label">起きてきた時刻</div><div class="row">
-        ${hmInput('data-obs-hm="wake_time" style="max-width:150px" aria-label="起きてきた時刻(4桁)"', o.wake_time)}
-        ${curDate === today ? '<button class="btn outline" style="width:auto;min-height:52px" data-act="wake-now">いま</button>' : ''}</div></div>`;
+        ${hmInput('data-obs-hm="wake_time" style="max-width:120px" aria-label="起きてきた時刻(4桁)"', o.wake_time)}
+        ${curDate === today ? '<button class="chip-btn" data-act="wake-now">いま</button>' : ''}</div></div>`;
     const isToday = curDate === today;
     const medBtn = (f, k, label, title, m) => {
       const sel = m.st === k;
@@ -550,24 +551,24 @@
     const snack = `<button class="chip-btn snack ${o.night_snack === 1 ? 'sel' : ''}" data-act="obs" data-f="night_snack" data-v="1" aria-pressed="${o.night_snack === 1}">寝る前の間食</button>`;
     const cards = {
       sleep: () => sleepCard(data.health, s),
-      morning: () => card('朝のようす', wake + scaleField('getup', o) + noteField(o, 'note_morning', '例: 起きてすぐはふらついていた')),
+      morning: () => card('朝のようす', wake + scaleField('getup', o) + noteField(o, 'note_morning', '例: 起きてすぐふらついた')),
       day: () => card('日中のようす', scaleField('gait', o) + scaleField('lying', o) + scaleField('outing', o) +
         `<div class="obs-field"><div class="obs-label">仕事・習い事</div>${setChips('activity', ACTIVITY, o.activity)}</div>` +
-        scaleField('meal', o, snack) + noteField(o, 'note_day', '例: 昼過ぎに2時間ほど横になっていた')),
+        scaleField('meal', o, snack) + noteField(o, 'note_day', '例: 昼過ぎに2時間横になった')),
       look: () => card('見た目のようす・本人のことば', scaleField('movement', o) +
-        '<p class="help" style="margin:-8px 0 14px">あなたの目で見た印象で大丈夫です。いちばん目立った時で。</p>' +
+        '<p class="help" style="margin:-4px 0 8px">あなたの目で見た印象で、いちばん目立った時で。</p>' +
         `<div class="obs-field"><div class="obs-label">本人が自分から口にしたこと</div>${setChips('complaint', COMPLAINT, o.complaint)}
           <p class="help">こちらからは聞きません。本人が自分から言った時だけ押します。</p></div>` +
-        noteField(o, 'complaint_note', '例: 口の動きが目立った / 夕方に「足が痛い」と言った')),
+        noteField(o, 'complaint_note', '例: 夕方「足が痛い」と言った')),
       easy: () => card('楽そうだった時間・できたこと', `<div class="obs-field"><div class="obs-label">楽そうだった時間帯</div>${setChips('easy_times', EASY, o.easy_times)}</div>` +
-        noteField(o, 'good_note', '例: ドラマを見て笑っていた / 一緒に買い物に行けた') +
+        noteField(o, 'good_note', '例: ドラマを見て笑っていた', 'できたこと') +
         '<p class="help">本人には聞かずに、見ていて気づいたことや、本人が自分から話したことだけ。</p>'),
-      meds: () => card('おくすり', meds + prn + medHelp + noteField(o, 'note_meds', '例: 寝る前の薬を飲むのが遅くなった')),
-      alcohol: () => card('アルコール', scaleField('alcohol', o, '', true) + noteField(o, 'note_alcohol', '例: 夕食でビールをコップ1杯')),
+      meds: () => card('おくすり', meds + prn + medHelp + noteField(o, 'note_meds', '例: 寝る前の薬が遅くなった')),
+      alcohol: () => card('アルコール', scaleField('alcohol', o, '', true) + noteField(o, 'note_alcohol', '例: 夕食でビール1杯')),
       memo: () => memoCard(data, curDate)
     };
     return nav + progress + cardOrder(s).map((k) => cards[k]()).join('') +
-      `<p class="help center" style="margin:4px 0 20px">押した内容はその場で保存されます。</p>`;
+      `<p class="help center" style="margin:2px 0 12px">押した内容はその場で保存されます。</p>`;
   }
 
   function sleepCard(h, s) {
@@ -598,48 +599,163 @@
     </section>`;
   }
 
-  /* ---- 一覧 ---- */
+  /* ---- 一覧: 項目ごとの記録状況を 7 日ずつ ---- */
   const SYM3 = ['○', '△', '×'];
-  const OUT_SYM = ['–', '近', '外'];
-  const MED_SYM = { all: '●', yes: '●', noc: '◐', part: '◔', no: '○', '': '–' };
+  const MED_SYM = { all: '●', yes: '●', noc: '◐', part: '◔', no: '○', '': '' };
+  // 毎日つける項目(「記録した数」に数える)。間食・ことば・頓服・仕事などは、あった日だけ押すので数えない
+  const CORE = ['wake_time', 'getup', 'gait', 'lying', 'outing', 'meal', 'movement', 'med_morning', 'med_night', 'alcohol'];
+  const filled = (v) => v != null && v !== '';
+  const coreCount = (o) => CORE.filter((k) => filled(o && o[k])).length;
+  const OBS_META = ['date', 'recorded_by', 'updated_at'];
+  const anyObs = (o) => !!o && Object.keys(o).some((k) => !OBS_META.includes(k) && filled(o[k]));
+  const sym = (list, v) => (v != null && list[v] != null ? list[v] : '');
+  const setAbbr = (v, abbr) => { const set = String(v || '').split(','); return abbr.filter(([k]) => set.includes(k)).map(([, a]) => a).join(''); };
+  const actAbbr = (v) => { const a = setAbbr(v, [['work', '出'], ['overtime', '残'], ['lesson', '習'], ['ballet', 'バ']]); return a.includes('残') ? a.replace('出', '') : a; };
+  const fmtSteps = (n) => (n < 10000 ? String(n) : (n / 10000).toFixed(1).replace(/\.0$/, '') + '万');
+  // [行の名前, 中身, 毎日つける項目か]。中身は (その日の観察, 眠りと歩数, メモの数) から作る
+  const LIST_ROWS = {
+    sleep: [['睡眠', (o, h) => (h && h.sleep_min != null ? (h.sleep_min / 60).toFixed(1) + 'h' : '')],
+      ['歩数', (o, h) => (h && h.steps != null ? fmtSteps(h.steps) : '')]],
+    morning: [['起きた時刻', (o) => String(o.wake_time || '').replace(/^0/, ''), 1], ['起き上がり', (o) => sym(SYM3, o.getup), 1]],
+    day: [['ふらつき', (o) => sym(SYM3, o.gait), 1], ['横になった', (o) => sym(['○', '少', '半', '全'], o.lying), 1],
+      ['外出', (o) => sym(['無', '近', '外'], o.outing), 1], ['仕事など', (o) => actAbbr(o.activity)],
+      ['食事', (o) => sym(['×', '少', '半', '普', '多'], o.meal), 1], ['間食', (o) => (o.night_snack === 1 ? '●' : '')]],
+    look: [['見た目', (o) => (o.movement != null ? String(o.movement) : ''), 1],
+      ['ことば', (o) => setAbbr(o.complaint, [['pain', '痛'], ['dizzy', 'ぐ'], ['other', '他']])]],
+    easy: [['楽な時間', (o) => setAbbr(o.easy_times, [['morning', '朝'], ['noon', '昼'], ['evening', '夕'], ['night', '夜']])],
+      ['できたこと', (o) => (o.good_note ? '✎' : '')]],
+    meds: [['朝の薬', (o) => MED_SYM[parseMed(o.med_morning, true).st] || '', 1], ['寝る前の薬', (o) => MED_SYM[parseMed(o.med_night).st] || '', 1],
+      ['頓服', (o) => { const n = prnList(o).length || o.prn || 0; return n ? n + '回' : ''; }]],
+    alcohol: [['アルコール', (o) => sym(['無', '有'], o.alcohol), 1]],
+    memo: [['メモ', (o, h, n) => (n ? n + '件' : '')]]
+  };
+  const LIST_NAMES = { sleep: '眠りと歩数(自動)' };
+  const NOTE_OF = { morning: 'note_morning', day: 'note_day', look: 'complaint_note', meds: 'note_meds', alcohol: 'note_alcohol' };
+  const NOTE_LABELS = [['note_morning', '朝'], ['note_day', '日中'], ['complaint_note', '見た目・ことば'], ['good_note', 'できたこと'], ['note_meds', '薬'], ['note_alcohol', 'アルコール']];
+  let listPage = 0;        // 0 = きょうまでの 7 日、1 = その前の 7 日 …
+  let listLoading = false, listFailed = false;
   function viewList() {
+    if (listFailed) return `<div class="card center"><p class="muted" style="margin-bottom:10px">一覧を読み込めませんでした。</p><button class="btn outline" data-act="list-retry">もう一度読み込む</button></div>`;
     if (!listData) { loadList(); return `<div class="card center muted">読み込んでいます…</div>`; }
-    const byDate = {};
-    const sdl = startDate(listData.settings);
-    for (let i = 0; i < 14; i++) { const d = addDays(listData.to, -i); if (!sdl || d >= sdl) byDate[d] = { date: d, memos: 0 }; }
-    listData.obs.forEach((o) => { if (byDate[o.date]) byDate[o.date].obs = o; });
-    listData.health.forEach((h) => { if (byDate[h.date]) byDate[h.date].health = h; });
-    listData.memos.forEach((m) => { if (byDate[m.date]) byDate[m.date].memos++; });
-    const dash = '<span class="muted">–</span>';
-    const rows = Object.values(byDate).map((r) => {
-      const o = r.obs || {};
-      const sl = r.health && r.health.sleep_min != null ? `${(r.health.sleep_min / 60).toFixed(1)}h` : '';
-      const med = (f) => MED_SYM[parseMed(o[f], f === 'med_morning').st] || '–';
-      return `<tr class="clickable" data-act="goto-date" data-date="${r.date}">
-        <td>${jpShort(r.date)}<span class="muted small"> ${DOW[dowOf(r.date)]}</span></td>
-        <td class="num">${o.movement != null ? o.movement : dash}</td>
-        <td class="num">${o.getup != null ? SYM3[o.getup] : dash}</td>
-        <td class="num">${o.gait != null ? SYM3[o.gait] : dash}</td>
-        <td class="num">${o.outing != null ? OUT_SYM[o.outing] : dash}</td>
-        <td class="num">${med('med_morning')}/${med('med_night')}</td>
-        <td class="num">${sl}</td></tr>`;
+    const s = listData.settings || {};
+    const sd = startDate(s);
+    const end = addDays(listData.to, -7 * listPage);
+    let start = addDays(end, -6);
+    if (sd && start < sd) start = sd;
+    if (start < listData.from) { loadList(addDays(start, -21)); return `<div class="card center muted">読み込んでいます…</div>`; } // 前の週の分を読み足す
+    const today = logicalToday();
+    const days = [];
+    for (let d = start; d <= end; d = addDays(d, 1)) days.push(d);
+    const obsBy = {}, hBy = {}, memoBy = {};
+    listData.obs.forEach((o) => { obsBy[o.date] = o; });
+    listData.health.forEach((h) => { hBy[h.date] = h; });
+    listData.memos.forEach((m) => { (memoBy[m.date] = memoBy[m.date] || []).push(m); });
+    const td = (d, inner, cls) => `<td class="${cls || ''}${d === today ? ' today' : ''}" data-act="goto-date" data-date="${d}">${inner}</td>`;
+    const miss = '<span class="miss">・</span>';
+    const head = `<tr><th class="lbl"></th>${days.map((d, i) => {
+      const [, m, dd] = d.split('-').map(Number); const w = dowOf(d);
+      return `<th class="${w === 0 ? 'sun' : w === 6 ? 'sat' : ''}${d === today ? ' today' : ''}" data-act="goto-date" data-date="${d}">${i === 0 || dd === 1 ? `${m}/${dd}` : dd}<small>${DOW[w]}</small></th>`;
+    }).join('')}</tr>`;
+    const count = `<tr class="count"><td class="lbl">記録した数</td>${days.map((d) => {
+      const n = coreCount(obsBy[d]);
+      return td(d, n ? `${n}<small>/${CORE.length}</small>` : miss, n === CORE.length ? 'full' : n ? 'part' : '');
+    }).join('')}</tr>`;
+    const body = cardOrder(s).map((k) => {
+      const name = LIST_NAMES[k] || (CARD_DEFS.find((c) => c[0] === k) || [k, k])[1];
+      let rows = (LIST_ROWS[k] || []).map(([label, fn, core]) => `<tr><td class="lbl">${label}</td>${days.map((d) => {
+        const v = fn(obsBy[d] || {}, hBy[d], (memoBy[d] || []).length);
+        return td(d, v ? esc(v) : core ? miss : '');
+      }).join('')}</tr>`).join('');
+      const nk = NOTE_OF[k];
+      if (nk && days.some((d) => obsBy[d] && obsBy[d][nk])) rows += `<tr><td class="lbl">備考</td>${days.map((d) => td(d, obsBy[d] && obsBy[d][nk] ? '✎' : '')).join('')}</tr>`;
+      return `<tr class="cat"><th colspan="${days.length + 1}">${esc(name)}</th></tr>${rows}`;
     }).join('');
-    const s = listData.settings;
+    const nav = `<div class="row date-nav"><button class="btn outline nav-btn" data-act="list-page" data-d="1" aria-label="前の7日" ${sd && start <= sd ? 'disabled' : ''}>◀</button>
+      <div class="spacer center"><b>${jpShort(start)}〜${jpShort(end)}</b></div>
+      <button class="btn outline nav-btn" data-act="list-page" data-d="-1" aria-label="次の7日" ${listPage === 0 ? 'disabled' : ''}>▶</button></div>`;
+    const legend = `<details class="legend"><summary>記号の見かた</summary><ul>
+      <li>・ まだ記録していない(毎日つける項目) / ✎ 書いた日 / 記録した数 = 毎日つける${CORE.length}項目のうち記録した数</li>
+      <li>起き上がり・ふらつき: ○ スムーズ・なし △ ゆっくり・少し × つらそう・目立つ</li>
+      <li>横になった: ○ ほとんどなし 少 2〜3時間 半 半日くらい 全 ほぼ一日 / 外出: 外 外出できた 近 近所だけ 無 なし</li>
+      <li>仕事など: 出 会社出勤 残 出勤+残業 習 習い事 バ バレエ</li>
+      <li>食事: 多 よく食べた 普 ふつう 半 半分くらい 少 少し × ほぼ食べず / 間食: ● 寝る前の間食</li>
+      <li>見た目: 不随意運動 1〜5 / ことば: 痛 痛み ぐ ぐるぐる 他 その他</li>
+      <li>楽な時間: 朝 昼 夕 夜 / 薬: ● 全部・飲んだ ◐ ${esc(medName(s))}以外 ◔ 一部 ○ 飲まなかった</li></ul></details>`;
+    const notes = days.slice().reverse().map((d) => {
+      const o = obsBy[d] || {};
+      const items = NOTE_LABELS.filter(([k]) => o[k]).map(([k, l]) => `<li><b>${l}</b>${esc(o[k])}</li>`)
+        .concat((memoBy[d] || []).map((m) => `<li><b>メモ ${hhmm(m.ts)}</b>${esc(m.text)}</li>`));
+      return items.length ? `<div class="day-notes" data-act="goto-date" data-date="${d}"><div class="d">${jpDate(d)}</div><ul>${items.join('')}</ul></div>` : '';
+    }).join('');
     let from = s.last_appointment || addDays(listData.to, -41);
-    if (startDate(s) && from < startDate(s)) from = startDate(s);
-    return `<section class="card"><h2>直近14日 <span class="link">タップで開く</span></h2>
-      <table class="list"><thead><tr><th>日付</th><th>見た目</th><th>起上</th><th>ふらつき</th><th>外出</th><th>薬 朝/夜</th><th>睡眠</th></tr></thead><tbody>${rows}</tbody></table>
-      <p class="help">見た目 = 不随意運動 1〜5 / 起上・ふらつき: ○ なし・スムーズ △ 少し × 目立つ・つらそう / 外出: 外 外出 近 近所 / 薬: ● 全部・飲んだ ◐ ${esc(medName(listData.settings || {}))}以外 ◔ 一部 ○ 飲まなかった</p></section>
+    if (sd && from < sd) from = sd;
+    const table = days.length ? `<table class="grid"><colgroup><col class="lbl">${days.map(() => '<col>').join('')}</colgroup>
+        <thead>${head}</thead><tbody>${count}${body}</tbody></table>` : `<p class="muted small">記録の開始日(${jpShort(sd)})から表示します。</p>`;
+    return `<section class="card grid-card"><h2>記録の一覧 <span class="link">日付を押すと開きます</span></h2>${nav}${table}${legend}</section>
+      ${notes ? `<section class="card"><h2>この7日の備考・メモ</h2>${notes}</section>` : ''}
       <section class="card"><h2>医師に見せるレポート</h2>
-        <p class="small" style="margin-bottom:10px">PC のブラウザで開き、印刷 →「PDF に保存」。期間はレポート画面でも変えられます。</p>
+        <p class="small" style="margin-bottom:8px">PC のブラウザで開き、印刷 →「PDF に保存」。期間はレポート画面でも変えられます。</p>
         <a class="btn primary" href="report.html?from=${from}&to=${listData.to}" target="_blank" rel="noopener">レポートを開く(${jpShort(from)}〜${jpShort(listData.to)})</a></section>`;
   }
-  async function loadList() {
+  async function loadList(from) {
+    if (listLoading) return;
+    listLoading = true;
+    const to = logicalToday();
     try {
-      const to = logicalToday();
-      const data = await call({ action: 'report', from: addDays(to, -13), to });
-      if (data.ok) { listData = data; if (tab === 'list') render(); }
-    } catch (e) { toast('一覧を読み込めませんでした'); }
+      const data = await call({ action: 'report', from: from || addDays(to, -27), to });
+      if (data.ok) listData = data;
+      else if (data.error === 'unauthorized') { listLoading = false; logout('ログインし直してください'); return; }
+      else listFailed = true;
+    } catch (e) { listFailed = true; }
+    listLoading = false;
+    if (tab === 'list') render();
+  }
+
+  /* ---- カレンダー(記録の画面で日付を押すと出る。印 = その日の記録の状況) ---- */
+  const calMarks = {}; // 'YYYY-MM' → { 日付: 'full' | 'part' }
+  function openCal() { sheet = { type: 'cal', month: curDate.slice(0, 7) }; renderOverlay(); loadCalMonth(sheet.month); }
+  async function loadCalMonth(ym) {
+    const today = logicalToday();
+    const from = ym + '-01';
+    if (from > today) return;
+    const [y, m] = ym.split('-').map(Number);
+    let to = `${ym}-${pad(new Date(y, m, 0).getDate())}`;
+    if (to > today) to = today;
+    try {
+      const data = await call({ action: 'report', from, to });
+      if (!data.ok) return;
+      const marks = {};
+      data.obs.forEach((o) => { if (anyObs(o)) marks[o.date] = coreCount(o) === CORE.length ? 'full' : 'part'; });
+      data.memos.forEach((mm) => { if (!marks[mm.date]) marks[mm.date] = 'part'; });
+      calMarks[ym] = marks;
+      if (sheet && sheet.type === 'cal' && sheet.month === ym) renderOverlay();
+    } catch (e) { /* 印なしのまま出す */ }
+  }
+  function calSheetHTML() {
+    const ym = sheet.month;
+    const [y, m] = ym.split('-').map(Number);
+    const today = logicalToday();
+    const sd = startDate();
+    const marks = calMarks[ym] || {};
+    const first = new Date(y, m - 1, 1).getDay();
+    const last = new Date(y, m, 0).getDate();
+    let cells = DOW.map((w, i) => `<span class="cal-w${i === 0 ? ' sun' : i === 6 ? ' sat' : ''}">${w}</span>`).join('');
+    for (let i = 0; i < first; i++) cells += '<span></span>';
+    for (let d = 1; d <= last; d++) {
+      const ds = `${ym}-${pad(d)}`;
+      const w = (first + d - 1) % 7;
+      const off = ds > today || (sd && ds < sd);
+      const cls = [ds === curDate ? 'sel' : '', ds === today ? 'today' : '', w === 0 ? 'sun' : w === 6 ? 'sat' : ''].join(' ');
+      cells += `<button class="cal-d ${cls}" data-act="cal-pick" data-date="${ds}" ${off ? 'disabled' : ''} aria-label="${m}月${d}日">${d}${marks[ds] ? `<i class="${marks[ds]}"></i>` : ''}</button>`;
+    }
+    const canPrev = !sd || addDays(ym + '-01', -1) >= sd;
+    const nd = new Date(y, m, 1);
+    const canNext = `${nd.getFullYear()}-${pad(nd.getMonth() + 1)}-01` <= today;
+    return wrapSheet(`<div class="cal-head"><button class="icon-btn" data-act="cal-month" data-d="-1" aria-label="前の月" ${canPrev ? '' : 'disabled'}>◀</button>
+        <b>${y}年${m}月</b><button class="icon-btn" data-act="cal-month" data-d="1" aria-label="次の月" ${canNext ? '' : 'disabled'}>▶</button></div>
+      <div class="cal-grid">${cells}</div>
+      <p class="help cal-legend"><i class="full"></i>毎日の${CORE.length}項目を全部記録 <i class="part"></i>一部だけ記録</p>
+      <div class="actions two"><button class="btn outline" data-act="cal-pick" data-date="${today}">きょうへ</button><button class="btn ghost" data-act="sheet-close">閉じる</button></div>`);
   }
 
   /* ---- くま(ひとことを送る・画像とリアクションを選ぶ) ---- */
@@ -904,7 +1020,7 @@
   function renderOverlay() {
     const el = document.getElementById('overlay');
     if (!sheet) { el.innerHTML = ''; return; }
-    const map = { memo: memoSheetHTML, key: keySheetHTML, psettings: patientSettingsHTML, health: healthSheetHTML, slot: slotSheetHTML, react: reactSheetHTML, image: imageSheetHTML, medtime: medTimeSheetHTML };
+    const map = { memo: memoSheetHTML, key: keySheetHTML, psettings: patientSettingsHTML, health: healthSheetHTML, slot: slotSheetHTML, react: reactSheetHTML, image: imageSheetHTML, medtime: medTimeSheetHTML, cal: calSheetHTML };
     el.innerHTML = map[sheet.type] ? map[sheet.type]() : '';
     if (sheet && sheet.type === 'memo') { const ta = el.querySelector('textarea'); if (ta && !sheet.focused) { sheet.focused = true; setTimeout(() => ta.focus(), 50); } }
   }
@@ -1084,6 +1200,7 @@
     if (cfg.role === 'supporter') data = cache && cache.date === curDate && 'obs' in cache ? cache : null;
     else data = cache && cache.room ? cache : null;
     root.innerHTML = cfg.role === 'supporter' ? viewSupporter(data) : viewPatient(data);
+    root.querySelectorAll('textarea.note').forEach((t) => { if (t.value) fitNote(t); });
     renderOverlay(); renderSync();
     if (!data) refresh(true);
   }
@@ -1211,8 +1328,27 @@
         break;
       case 'refresh': sheet = null; renderOverlay(); refresh(); toast('更新しています…'); break;
       case 'logout': if (confirm('ログアウトしますか？(送信済みの記録は消えません)')) logout(); break;
-      case 'tab': tab = el.dataset.tab; if (tab === 'list') listData = null; render(); break;
+      case 'tab': tab = el.dataset.tab; if (tab === 'list') { listData = null; listPage = 0; listFailed = false; } render(); break;
+      case 'list-page': listPage = Math.max(0, listPage + parseInt(el.dataset.d, 10)); render(); break;
+      case 'list-retry': listFailed = false; listData = null; render(); break;
+      case 'cal-open': openCal(); break;
+      case 'cal-month': {
+        const [y, m] = sheet.month.split('-').map(Number);
+        const d = new Date(y, m - 1 + parseInt(el.dataset.d, 10), 1);
+        sheet.month = `${d.getFullYear()}-${pad(d.getMonth() + 1)}`;
+        renderOverlay(); loadCalMonth(sheet.month);
+        break;
+      }
+      case 'cal-pick': {
+        if (el.disabled) break;
+        const d = el.dataset.date;
+        sheet = null; renderOverlay();
+        if (d !== curDate) { curDate = d; cache = null; }
+        tab = 'today'; render(); window.scrollTo(0, 0);
+        break;
+      }
       case 'date': {
+        if (el.disabled) break;
         const next = addDays(curDate, parseInt(el.dataset.delta, 10));
         if (startDate() && next < startDate()) break; // 記録の開始日より前には戻らない
         curDate = next; cache = null; render(); break;
@@ -1266,6 +1402,7 @@
   });
   // シートの入力中の文字を覚えておく(描き直しても消えないように)
   document.addEventListener('input', (e) => {
+    if (e.target.classList && e.target.classList.contains('note')) fitNote(e.target);
     if (!sheet) return;
     const t = e.target;
     if (t.id === 'memo-text') sheet.text = t.value;
