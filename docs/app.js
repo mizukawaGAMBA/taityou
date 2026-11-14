@@ -447,7 +447,7 @@
   // ヘルスケア連携(サポーターが共有したショートカット)の状態
   function healthLink(s) {
     s = s || {};
-    const name = s.health_shortcut_name || 'くまヘルス送信';
+    const name = s.health_shortcut_name || 'KMヘルスチェック送信';
     return { ready: !!s.health_shortcut_url, consent: s.health_consent === '1', url: s.health_shortcut_url || '', name,
       runUrl: 'shortcuts://run-shortcut?name=' + encodeURIComponent(name) };
   }
@@ -1058,7 +1058,7 @@
   function saveHealthLink(form) {
     const f = new FormData(form);
     const url = String(f.get('health_shortcut_url') || '').trim();
-    const name = String(f.get('health_shortcut_name') || '').trim() || 'くまヘルス送信';
+    const name = String(f.get('health_shortcut_name') || '').trim() || 'KMヘルスチェック送信';
     if (url && !/^https:\/\/(www\.)?icloud\.com\/shortcuts\/[A-Za-z0-9]+/.test(url)) { toast('リンクは https://www.icloud.com/shortcuts/… の形です'); return; }
     const settings = { health_shortcut_url: url, health_shortcut_name: name };
     enqueue({ action: 'saveSettings', settings }, (c) => { c.settings = Object.assign({}, c.settings, settings); });

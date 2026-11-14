@@ -273,7 +273,7 @@ function toCell(v) {
  * 日付は「論理日」(午前4時区切り)の "YYYY-MM-DD" 文字列。時刻は "HH:MM"。
  * ===================================================================== */
 var Core = (function () {
-  var VERSION = 7;
+  var VERSION = 8;
   var IMAGE_PARTS = 10;       // 1 枚の画像を最大 10 個のセルに分けて入れる
   var IMAGE_CHUNK = 40000;    // 1 セルに入れる文字数(セルの上限は 50,000 文字)
   var IMAGE_META_COLS = 7;    // 画像の表の、データ以外の列の数
@@ -311,7 +311,7 @@ var Core = (function () {
     start_date: '2026-10-31',              // 記録の正式な開始日。これより前の日は記録・表示しない
     health_per_day: '2',                   // 眠りと歩数を自動で送る回数(1 = 朝4時以降に1回、2 = 朝4時〜と夕方4時〜に1回ずつ)
     health_shortcut_url: '',               // サポーターが作って共有したショートカットの iCloud リンク
-    health_shortcut_name: 'くまヘルス送信', // そのショートカットの名前(アプリから試しに実行するのに使う)
+    health_shortcut_name: 'KMヘルスチェック送信', // そのショートカットの名前(アプリから試しに実行するのに使う)
     health_consent: '0',                   // 本人の同意(1 = 同意している)。同意できるのは本人の端末だけ
     health_consent_at: '',
     health_consent_by: '',
@@ -494,11 +494,17 @@ var Core = (function () {
     if (s instanceof Date) return s.getTime();
     if (typeof s === 'number') return s;
     if (!s) return NaN;
-    var t = String(s).trim()
-      .replace(/(\d{4})年(\d{1,2})月(\d{1,2})日/, '$1-$2-$3') // 「2026年10月31日 23:12」の形も読む
-      .replace(/\//g, '-').replace(/\s+/, 'T');
-    var m = t.match(/^(\d{4})-(\d{1,2})-(\d{1,2})(?:T(\d{1,2}):(\d{2})(?::(\d{2}))?)?$/);
-    if (m) return new Date(+m[1], +m[2] - 1, +m[3], m[4] ? +m[4] : 0, m[5] ? +m[5] : 0, m[6] ? +m[6] : 0).getTime();
+    var t = String(s).trim();
+    // 「2026-11-14 23:05」「2026/11/14 23:05」「2026年11月14日土 23:05:00 +0900」「2026/11/14 午後11:05」などを、
+    // その土地の時刻として読む(曜日や +0900 は読み飛ばす)
+    var m = t.match(/^(\d{4})\D(\d{1,2})\D(\d{1,2})\D*?(午前|午後|AM|PM)?\s*(?:(\d{1,2}):(\d{2})(?::(\d{2}))?)?\s*(午前|午後|AM|PM)?(?:\s*[+-]\d{2}:?\d{2})?$/i);
+    if (m) {
+      var h = m[5] ? +m[5] : 0;
+      var ap = String(m[4] || m[8] || '').toUpperCase();
+      if ((ap === '午後' || ap === 'PM') && h < 12) h += 12;
+      if ((ap === '午前' || ap === 'AM') && h === 12) h = 0;
+      return new Date(+m[1], +m[2] - 1, +m[3], h, m[6] ? +m[6] : 0, m[7] ? +m[7] : 0).getTime();
+    }
     return Date.parse(t);
   }
   function ymdOf(ms) { var d = new Date(ms); return d.getFullYear() + '-' + pad2(d.getMonth() + 1) + '-' + pad2(d.getDate()); }
@@ -508,8 +514,9 @@ var Core = (function () {
     if (typeof v === 'number') return ['inbed', 'core', 'awake', 'core', 'deep', 'rem'][v] || 'core';
     var s = String(v).toLowerCase();
     if (/^\d+$/.test(s)) return sleepCategory(parseInt(s, 10));
-    if (s.indexOf('bed') >= 0 || s.indexOf('ベッド') >= 0 || s.indexOf('就床') >= 0) return 'inbed';
-    if (s.indexOf('awake') >= 0 || s.indexOf('覚醒') >= 0 || s.indexOf('目覚') >= 0 || s.indexOf('起き') >= 0) return 'awake';
+    // iOS の版や言語で言葉が変わるので、ベッド内(就寝・就床)と起きている(覚醒・目が覚めた)は広めに拾う
+    if (s.indexOf('bed') >= 0 || s.indexOf('ベッド') >= 0 || s.indexOf('就床') >= 0 || s.indexOf('就寝') >= 0) return 'inbed';
+    if (s.indexOf('awake') >= 0 || s.indexOf('覚') >= 0 || s.indexOf('目覚') >= 0 || s.indexOf('起き') >= 0) return 'awake';
     if (s.indexOf('deep') >= 0 || s.indexOf('深') >= 0) return 'deep';
     if (s.indexOf('rem') >= 0 || s.indexOf('レム') >= 0) return 'rem';
     return 'core';
@@ -582,7 +589,8 @@ var Core = (function () {
   // "開始|終了|値" を 1 行ずつ書いたテキスト(ショートカットで作りやすい)を配列へ
   function splitLines(text) {
     if (isBlank(text)) return [];
-    return String(text).split(/\r?\n/).map(function (line) { return line.trim().split(/\s*[|\t]\s*/); })
+    // 区切りは半角の | かタブ。日本語キーボードで打ちやすい全角の ｜ も受け付ける
+    return String(text).split(/\r?\n/).map(function (line) { return line.trim().split(/\s*[|\t｜]\s*/); })
       .filter(function (parts) { return parts.length >= 2 && parts[0]; });
   }
   function isSleepType(t) { t = toStr(t).toLowerCase(); return t.indexOf('sleep') === 0 || t === '睡眠' || t === '睡眠分析'; }
@@ -741,6 +749,9 @@ var Core = (function () {
   // iPhone のショートカット(連携キー)から届く健康データ。
   // 何度届いてもよい: 眠りは前より短い計算結果では上書きせず、歩数は大きい方を残す
   actions.health = function (req, store, env, device) {
+    // ショートカットのキー名の打ち間違い(s の付け忘れ)も受け付ける
+    if (isBlank(req.steps_lines) && !isBlank(req.step_lines)) req.steps_lines = req.step_lines;
+    if (isBlank(req.sleep_lines) && !isBlank(req.sleep_line)) req.sleep_lines = req.sleep_line;
     var today = env.today();
     var oldest = addDays(today, -31);
     var patches = {};
@@ -773,8 +784,16 @@ var Core = (function () {
     var summary = describeAll(patches);
     // ショートカット(連携キー)からの送信は、本人が「同意」している時だけ保存する
     if (device.role === 'health' && getSettings(store).health_consent !== '1') {
+      // 試しの送信では、眠りの段階の数と届いた 1 行目も残す(ショートカットが正しく作れたかを、記録する人が確かめるため)
+      var cats = { core: 0, deep: 0, rem: 0, awake: 0, inbed: 0 };
+      var catNames = { core: 'コア', deep: '深い', rem: 'レム', awake: '覚醒', inbed: 'ベッド内' };
+      sleepSamplesFrom(req).forEach(function (s) { cats[s.cat]++; });
+      var stages = Object.keys(cats).filter(function (k) { return cats[k]; }).map(function (k) { return catNames[k] + cats[k]; }).join(' ');
+      var firstSleep = toStr(req.sleep_lines).split(/\r?\n/)[0].slice(0, 60);
+      var firstSteps = toStr(req.steps_lines).split(/\r?\n/)[0].slice(0, 40);
+      var detail = (stages ? ' / 眠りの段階: ' + stages : '') + (firstSleep ? ' / 眠りの1行目: ' + firstSleep : '') + (firstSteps ? ' / 歩数の1行目: ' + firstSteps : '');
       setSetting(store, 'health_try_at', env.now());
-      setSetting(store, 'health_try', summary);
+      setSetting(store, 'health_try', summary + detail);
       return { ok: false, error: 'no_consent', preview: patches, message: '本人の同意がまだないので、保存しませんでした。読み取れた内容: ' + summary };
     }
 
