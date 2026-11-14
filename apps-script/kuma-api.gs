@@ -273,7 +273,7 @@ function toCell(v) {
  * 日付は「論理日」(午前4時区切り)の "YYYY-MM-DD" 文字列。時刻は "HH:MM"。
  * ===================================================================== */
 var Core = (function () {
-  var VERSION = 8;
+  var VERSION = 9;
   var IMAGE_PARTS = 10;       // 1 枚の画像を最大 10 個のセルに分けて入れる
   var IMAGE_CHUNK = 40000;    // 1 セルに入れる文字数(セルの上限は 50,000 文字)
   var IMAGE_META_COLS = 7;    // 画像の表の、データ以外の列の数
@@ -292,7 +292,8 @@ var Core = (function () {
                    'activity'],
     // iPhone / Apple Watch から自動で届く値(1 日 1 行)。列は右に足していく(前の版のシートとそろえるため)
     health_daily: ['date', 'sleep_min', 'inbed_min', 'awakenings', 'deep_min', 'rem_min', 'bed_start', 'bed_end',
-                   'steps', 'steadiness', 'resting_hr', 'hrv', 'move_score', 'source', 'updated_at', 'nap_min', 'walking_speed'],
+                   'steps', 'steadiness', 'resting_hr', 'hrv', 'move_score', 'source', 'updated_at', 'nap_min', 'walking_speed',
+                   'walk_asym', 'double_support', 'step_length', 'metric_series'],
     memo:         ['id', 'date', 'ts', 'text', 'deleted', 'created_at'],
     reaction:     ['id', 'date', 'from_name', 'type', 'message', 'seen', 'created_at', 'label', 'image'],
     settings:     ['key', 'value'],
@@ -339,7 +340,7 @@ var Core = (function () {
   var MED_RE = /^(?:(?:yes|all|part|noc)(?: (?:[01]\d|2[0-3]):[0-5]\d)?|no)$/;
   var PRN_TIMES_RE = /^(?:(?:[01]\d|2[0-3]):[0-5]\d)(?:,(?:[01]\d|2[0-3]):[0-5]\d){0,19}$/;
   var SLOT_KEYS = ['title', 'loading', 'normal', 'sleepy', 'love', 'happy', 'role_patient', 'role_supporter'];
-  var HEALTH_SCALARS = ['steadiness', 'resting_hr', 'hrv', 'move_score', 'walking_speed'];
+  var HEALTH_SCALARS = ['steadiness', 'resting_hr', 'hrv', 'move_score', 'walking_speed', 'walk_asym', 'double_support', 'step_length'];
   var HEALTH_TEXT = { steadiness: 1 };
   var SLEEP_FIELDS = ['sleep_min', 'inbed_min', 'awakenings', 'deep_min', 'rem_min', 'bed_start', 'bed_end', 'nap_min'];
 
@@ -409,6 +410,8 @@ var Core = (function () {
       date: toStr(r.date), sleep_min: toInt(r.sleep_min), inbed_min: toInt(r.inbed_min), awakenings: toInt(r.awakenings),
       deep_min: toInt(r.deep_min), rem_min: toInt(r.rem_min), bed_start: toStr(r.bed_start) || null, bed_end: toStr(r.bed_end) || null,
       nap_min: toInt(r.nap_min), steps: toInt(r.steps), steadiness: toStr(r.steadiness) || null, walking_speed: toNum(r.walking_speed),
+      walk_asym: toNum(r.walk_asym), double_support: toNum(r.double_support), step_length: toNum(r.step_length),
+      metric_series: parseSeries(r.metric_series), // 1 日の中の時刻ごとの値(歩き方・心拍)
       resting_hr: toNum(r.resting_hr), hrv: toNum(r.hrv), move_score: toNum(r.move_score), source: toStr(r.source), updated_at: toStr(r.updated_at)
     };
   }
@@ -614,6 +617,121 @@ var Core = (function () {
     (Array.isArray(req.samples) ? req.samples : []).forEach(function (s) { if (s && isStepsType(s.type)) add(s.start, s.value); });
     return out;
   }
+  // ---------- 歩き方・心拍(metrics_lines) ----------
+  // 1 行 = 「種類|開始日|値|単位」。種類の名前は日本語でも英語でも読む。同じ日の値は平均する
+  var METRIC_NAMES = [
+    ['hrv', ['心拍変動', 'variability', 'hrv']],
+    ['resting_hr', ['安静時心拍', 'resting heart']],
+    ['walk_asym', ['非対称', 'asymmetry']],
+    ['double_support', ['両足', 'double support']],
+    ['step_length', ['歩幅', 'step length']],
+    ['steadiness', ['安定性', 'steadiness']],
+    ['walking_speed', ['歩行速度', '歩く速さ', 'walking speed']]
+  ];
+  function metricOf(name) {
+    var t = toStr(name).toLowerCase();
+    for (var i = 0; i < METRIC_NAMES.length; i++) {
+      for (var j = 0; j < METRIC_NAMES[i][1].length; j++) if (t.indexOf(METRIC_NAMES[i][1][j]) >= 0) return METRIC_NAMES[i][0];
+    }
+    return '';
+  }
+  // 戻り値: byDate { 日付: { 項目: 平均 } }、raw { 項目: 届いた数 }、series { 日付: { 項目: [[時刻, 値], ...] } }
+  function metricsByDate(req) {
+    var acc = {}; // 項目 → [{ d, v, unit }]
+    splitLines(req.metrics_lines).forEach(function (parts) {
+      var key = '', when = NaN, value = null, unit = '';
+      parts.forEach(function (x) {
+        if (!key && metricOf(x)) { key = metricOf(x); return; }
+        if (isNaN(when) && /\d{4}\D\d{1,2}\D\d{1,2}/.test(x)) { var t = parseWhen(x); if (!isNaN(t)) { when = t; return; } }
+        if (value === null && toNum(x) !== null) { value = toNum(x); unit += ' ' + String(x).replace(/[\d.,\s-]/g, ''); return; }
+        unit += ' ' + x;
+      });
+      if (!key || isNaN(when) || value === null) return;
+      if (!acc[key]) acc[key] = [];
+      acc[key].push({ d: ymdOf(when), t: hm(when), v: value, unit: unit.toLowerCase() });
+    });
+    // 割合(%)の項目は、0〜1 で届く iPhone と 0〜100 で届く iPhone があるので、どちらかを見分けて % にそろえる。
+    // 両足支持時間(だいたい 20〜40%)と歩行安定性で見分け、無ければその項目の値の大きさで決める
+    function allSmall(key) { return acc[key].every(function (x) { return x.v <= 1; }); }
+    var fraction = acc.double_support ? allSmall('double_support') : acc.steadiness ? allSmall('steadiness') : null;
+    var out = {}, raw = {}, series = {};
+    Object.keys(acc).forEach(function (key) {
+      var list = acc[key];
+      raw[key] = list.length;
+      var unitText = list.map(function (x) { return x.unit; }).join(' ');
+      var scale = 1;
+      if (key === 'walk_asym' || key === 'double_support' || key === 'steadiness') {
+        // 1 を超える値があれば 0〜100 で届いている。無ければ、両足支持時間などで見分けた方に合わせる(それも無ければ 0〜1)
+        var frac = !allSmall(key) ? false : fraction !== null ? fraction : true;
+        scale = frac ? 100 : 1;
+      } else if (key === 'step_length') {
+        scale = /cm/.test(unitText) ? 1 : /in/.test(unitText) ? 2.54 : list.every(function (x) { return x.v < 3; }) ? 100 : 1; // m → cm
+      } else if (key === 'walking_speed') {
+        scale = /m\/s|m\/秒/.test(unitText) ? 3.6 : /mi/.test(unitText) ? 1.609 : 1; // km/時にそろえる
+      } else if (key === 'hrv') {
+        scale = list.every(function (x) { return x.v < 1; }) ? 1000 : 1; // 秒 → ミリ秒
+      }
+      list.forEach(function (x) {
+        if (!series[x.d]) series[x.d] = {};
+        (series[x.d][key] = series[x.d][key] || []).push([x.t, metricRound(key, x.v * scale)]);
+      });
+    });
+    // 日ごとの平均は、時刻ごとの値から出す
+    Object.keys(series).forEach(function (d) {
+      series[d] = mergeSeries(null, series[d]);
+      out[d] = seriesAverages(series[d]);
+    });
+    return { byDate: out, raw: raw, series: series };
+  }
+  // 項目ごとの小数の桁(歩く速さ 0.01、左右差・両足支持 0.1、ほかは整数)
+  function metricRound(key, v) {
+    var digits = key === 'walking_speed' ? 100 : (key === 'walk_asym' || key === 'double_support') ? 10 : 1;
+    return Math.round(v * digits) / digits;
+  }
+  // 1 日の「時刻ごとの値」{ 項目: [[時刻, 値], ...] } を合わせる。同じ時刻・同じ値は 1 つにし、時刻順に並べる
+  // (送るたびに過去 2 日分が届くので、前に届いた分と重ねても増えないように)
+  var SERIES_MAX = 300; // 1 日 1 項目あたりの上限(セルに入る大きさにするため)
+  function mergeSeries(a, b) {
+    var out = {};
+    [a, b].forEach(function (src) {
+      if (!src || typeof src !== 'object') return;
+      Object.keys(src).forEach(function (k) {
+        if (!Array.isArray(src[k])) return;
+        if (!out[k]) out[k] = {};
+        src[k].forEach(function (p) { if (Array.isArray(p) && typeof p[0] === 'string' && typeof p[1] === 'number') out[k][p[0] + '|' + p[1]] = p; });
+      });
+    });
+    var res = {};
+    Object.keys(out).sort().forEach(function (k) {
+      res[k] = Object.keys(out[k]).map(function (x) { return out[k][x]; })
+        .sort(function (p, q) { return p[0] < q[0] ? -1 : p[0] > q[0] ? 1 : p[1] - q[1]; }).slice(0, SERIES_MAX);
+    });
+    return res;
+  }
+  function seriesAverages(sr) {
+    var out = {};
+    Object.keys(sr).forEach(function (k) {
+      if (!sr[k].length) return;
+      out[k] = metricRound(k, sr[k].reduce(function (a, p) { return a + p[1]; }, 0) / sr[k].length);
+    });
+    return out;
+  }
+  function parseSeries(v) {
+    if (isBlank(v)) return null;
+    try { var o = JSON.parse(String(v)); return o && typeof o === 'object' && !Array.isArray(o) ? o : null; } catch (e) { return null; }
+  }
+  var METRIC_LABEL = { walking_speed: ['速さ', 'km/時'], step_length: ['歩幅', 'cm'], walk_asym: ['左右差', '%'], double_support: ['両足支持', '%'],
+    steadiness: ['安定性', '%'], resting_hr: ['安静心拍', ''], hrv: ['心拍変動', 'ms'] };
+  function describeMetrics(patches) {
+    var ds = Object.keys(patches).sort();
+    var parts = [];
+    Object.keys(METRIC_LABEL).forEach(function (k) {
+      var d = ds.filter(function (x) { return patches[x][k] !== undefined && patches[x][k] !== null; }).pop();
+      if (d) parts.push(METRIC_LABEL[k][0] + ' ' + patches[d][k] + METRIC_LABEL[k][1]);
+    });
+    return parts.join('・');
+  }
+
   function describeAll(patches) {
     var ds = Object.keys(patches).sort();
     var parts = [];
@@ -624,6 +742,8 @@ var Core = (function () {
     }
     var std = ds.filter(function (d) { return patches[d].steps !== undefined; }).pop();
     if (std) parts.push(md(std) + 'の歩数 ' + commas(patches[std].steps) + '歩');
+    var mt = describeMetrics(patches);
+    if (mt) parts.push('歩き方・心拍 ' + mt);
     if (!parts.length && ds.length) parts.push(md(ds[ds.length - 1]) + 'の値 ' + Object.keys(patches[ds[ds.length - 1]]).length + '項目');
     return parts.length ? parts.join('、') : '数値なし';
   }
@@ -773,6 +893,13 @@ var Core = (function () {
     var steps = stepsByDate(req);
     Object.keys(steps).forEach(function (d) { if (inRange(d)) patchFor(d).steps = Math.round(steps[d]); });
     if (!Object.keys(steps).length && !isBlank(req.steps) && toNum(req.steps) !== null) patchFor(today).steps = Math.round(toNum(req.steps));
+    var metrics = metricsByDate(req);
+    Object.keys(metrics.byDate).forEach(function (d) {
+      if (!inRange(d)) return;
+      var m = metrics.byDate[d];
+      Object.keys(m).forEach(function (k) { patchFor(d)[k] = k === 'steadiness' ? String(m[k]) : m[k]; });
+      patchFor(d).metric_series = metrics.series[d];
+    });
     HEALTH_SCALARS.forEach(function (f) {
       if (!(f in req) || isBlank(req[f])) return;
       var v = HEALTH_TEXT[f] ? toStr(req[f]).slice(0, 40) : toNum(req[f]);
@@ -791,7 +918,10 @@ var Core = (function () {
       var stages = Object.keys(cats).filter(function (k) { return cats[k]; }).map(function (k) { return catNames[k] + cats[k]; }).join(' ');
       var firstSleep = toStr(req.sleep_lines).split(/\r?\n/)[0].slice(0, 60);
       var firstSteps = toStr(req.steps_lines).split(/\r?\n/)[0].slice(0, 40);
-      var detail = (stages ? ' / 眠りの段階: ' + stages : '') + (firstSleep ? ' / 眠りの1行目: ' + firstSleep : '') + (firstSteps ? ' / 歩数の1行目: ' + firstSteps : '');
+      var firstMetric = toStr(req.metrics_lines).split(/\r?\n/)[0].slice(0, 70);
+      var counts = Object.keys(metrics.raw).map(function (k) { return METRIC_LABEL[k][0] + metrics.raw[k]; }).join(' ');
+      var detail = (stages ? ' / 眠りの段階: ' + stages : '') + (firstSleep ? ' / 眠りの1行目: ' + firstSleep : '') + (firstSteps ? ' / 歩数の1行目: ' + firstSteps : '') +
+        (counts ? ' / 歩き方・心拍の件数: ' + counts : '') + (firstMetric ? ' / 歩き方・心拍の1行目: ' + firstMetric : '');
       setSetting(store, 'health_try_at', env.now());
       setSetting(store, 'health_try', summary + detail);
       return { ok: false, error: 'no_consent', preview: patches, message: '本人の同意がまだないので、保存しませんでした。読み取れた内容: ' + summary };
@@ -811,6 +941,14 @@ var Core = (function () {
         if (useSleep) SLEEP_FIELDS.forEach(function (f) { if (!ex || ex[f] !== p[f]) write[f] = p[f]; });
       }
       if ('steps' in p && (!ex || ex.steps === null || p.steps > ex.steps)) write.steps = p.steps;
+      if (p.metric_series) {
+        // 前に届いた時刻ごとの値と合わせ、その日の平均も全部から出し直す
+        var merged = mergeSeries(ex ? ex.metric_series : null, p.metric_series);
+        var json = JSON.stringify(merged);
+        if (!ex || JSON.stringify(ex.metric_series) !== json) write.metric_series = json;
+        var avgs = seriesAverages(merged);
+        Object.keys(avgs).forEach(function (k) { p[k] = k === 'steadiness' ? String(avgs[k]) : avgs[k]; });
+      }
       HEALTH_SCALARS.forEach(function (f) { if (f in p && (!ex || ex[f] !== p[f])) write[f] = p[f]; });
       if (!Object.keys(write).length) return;
       write.source = toStr(req.source).slice(0, 20) || device.role;

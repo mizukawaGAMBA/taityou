@@ -89,6 +89,42 @@
     const awak = vals((d) => (d.health && d.health.awakenings != null ? d.health.awakenings : null));
     const naps = vals((d) => (d.health && d.health.nap_min ? d.health.nap_min : null));
     const steps = vals((d) => (d.health && d.health.steps != null ? d.health.steps : null));
+    // 歩き方・心拍(iPhone / Apple Watch)。値のある日だけ平均する
+    const hv = (k) => vals((d) => (d.health && d.health[k] != null && d.health[k] !== '' && !isNaN(Number(d.health[k])) ? Number(d.health[k]) : null));
+    const GAIT = [['walking_speed', '歩く速さ', 'km/時', 2], ['step_length', '歩幅', 'cm', 0], ['walk_asym', '左右差(歩行非対称性)', '%', 1],
+      ['double_support', '両足支持時間', '%', 1], ['steadiness', '歩行安定性', '%', 0]];
+    const HEART = [['resting_hr', '安静時心拍数', '回/分', 0], ['hrv', '心拍変動', 'ms', 0]];
+    const rnd = (v, dg) => (Math.round(v * Math.pow(10, dg)) / Math.pow(10, dg)).toFixed(dg);
+    const metricText = (list) => list.map(([k, l, u, dg]) => { const a = hv(k); return a.length ? `${l} ${rnd(avg(a), dg)}${u} <small>(${a.length}日)</small>` : ''; }).filter(Boolean).join(' / ');
+    const gaitText = metricText(GAIT), heartText = metricText(HEART);
+    // 1 日の中の変化: 時刻ごとの値(metric_series)から
+    const GAIT3 = [['walking_speed', '歩く速さ', 'km/時', 2], ['walk_asym', '左右差(歩行非対称性)', '%', 1], ['double_support', '両足支持時間', '%', 1]];
+    const seriesOf = (d, k) => (d.health && d.health.metric_series && Array.isArray(d.health.metric_series[k]) ? d.health.metric_series[k] : []);
+    const hmToH = (t) => { const [h, m] = String(t).split(':').map(Number); return h + m / 60; };
+    const dayRanges = (k) => days.map((d) => seriesOf(d, k)).filter((sr) => sr.length >= 2).map((sr) => { const vs = sr.map((p) => p[1]); return Math.max(...vs) - Math.min(...vs); });
+    const rangeSummary = GAIT3.map(([k, l, u, dg]) => { const rs = dayRanges(k); return rs.length ? `${l} ${rnd(avg(rs), dg)}${u} <small>(${rs.length}日)</small>` : ''; }).filter(Boolean).join(' / ');
+    const medHour = (d) => { if (!d.o) return null; const m = parseMed(d.o.med_morning, true); return (m.st === 'all' || m.st === 'part') && m.t ? hmToH(m.t) : null; };
+    const samplesOf = (k) => days.flatMap((d) => seriesOf(d, k).map((p) => ({ d, h: hmToH(p[0]), v: p[1] })));
+    const TOD = [[0, 6, '0–6'], [6, 9, '6–9'], [9, 12, '9–12'], [12, 15, '12–15'], [15, 18, '15–18'], [18, 21, '18–21'], [21, 24, '21–24']];
+    const SINCE = [[-24, 0, '飲む前'], [0, 2, '0–2'], [2, 4, '2–4'], [4, 6, '4–6'], [6, 8, '6–8'], [8, 10, '8–10'], [10, 12, '10–12'], [12, 24, '12〜']];
+    const binsOf = (list, defs, at) => defs.map(([a, b, label]) => {
+      const vs = list.filter((x) => { const h = at(x); return h != null && h >= a && h < b; }).map((x) => x.v);
+      return { label, n: vs.length, v: vs.length ? avg(vs) : null };
+    });
+    let profileIds = [];
+    const profiles = GAIT3.map(([k, l, u, dg], i) => {
+      const list = samplesOf(k);
+      const tod = binsOf(list, TOD, (x) => x.h);
+      if (list.length < 6 || tod.filter((b) => b.v != null).length < 2) return '';
+      const since = binsOf(list, SINCE, (x) => { const mh = medHour(x.d); return mh == null ? null : x.h - mh; });
+      const fmt = (v) => rnd(v, dg);
+      const idA = `p${i}a`, idB = `p${i}b`;
+      profileIds.push([idA, tod, fmt, u], [idB, since, fmt, u]);
+      const right = since.filter((b) => b.v != null).length >= 2
+        ? profileChart(since, { label: `${l}(${u})`, note: `朝の薬(${mn})を飲んでからの時間`, fmt }, idB)
+        : `<p class="empty">朝の薬の時刻が記録された日のデータが、まだ足りません。</p>`;
+      return `<div class="pair avoid"><div>${profileChart(tod, { label: `${l}(${u})`, note: '時刻(時)', fmt }, idA)}</div><div>${right}</div></div>`;
+    }).join('');
     const wakes = vals((d) => (d.o && d.o.wake_time ? d.o.wake_time : null));
     const minutes = (t) => { let [h, m] = t.split(':').map(Number); if (h < 4) h += 24; return h * 60 + m; };
     const clock = (v) => `${pad(Math.floor(v / 60) % 24)}:${pad(v % 60)}`;
@@ -128,6 +164,9 @@
       <tr><th>起きてきた時刻</th><td>${wakeText}</td></tr>
       <tr><th>睡眠(Apple Watch)</th><td>平均 ${hm(avg(sleep))} <small>/ 5分以上の目覚め 平均 ${f1(avg(awak))}回${naps.length ? ` / 昼寝など ${naps.length}日(平均 ${Math.round(avg(naps))}分)` : ''}(データ ${sleep.length}日)</small></td></tr>
       <tr><th>歩数(iPhone / Watch)</th><td>平均 ${steps.length ? Math.round(avg(steps)).toLocaleString() + '歩' : '–'} <small>(データ ${steps.length}日)</small></td></tr>
+      ${gaitText ? `<tr><th>歩き方(iPhone、期間の平均)</th><td>${gaitText}<br><small>iPhone をポケットに入れて歩いた時に自動で測られる値。左右差・両足支持時間は大きいほど、歩く速さ・歩幅・歩行安定性は小さいほど、歩きにくさの目安</small></td></tr>` : ''}
+      ${heartText ? `<tr><th>心拍(Apple Watch、期間の平均)</th><td>${heartText}</td></tr>` : ''}
+      ${rangeSummary ? `<tr><th>歩き方の1日の中の変動(iPhone)</th><td>1日の最大と最小の差の平均: ${rangeSummary}<br><small>2回以上測れた日だけ。時間帯ごとの違いは「1日の中の変化」のグラフ</small></td></tr>` : ''}
       <tr><th>服薬(家族の確認)</th><td>${MEDS.map(medRow).join('<br>')}<br><small>頓服 合計 ${prnTotal}回</small></td></tr>
       <tr><th>アルコール</th><td>あり ${alcoholDays}日 <small>(記録 ${alcoholKnown}日中)</small></td></tr>
       <tr><th>本人が自分から訴えた日</th><td>${countSet('complaint', COMPLAINT)} <small>(こちらからはたずねていません)</small></td></tr>
@@ -142,6 +181,22 @@
     const stepMax = niceMax(Math.max(0, ...steps));
     const chart3 = barChart(days, { label: '歩数', note: 'iPhone / Apple Watch', fmt: (v) => Math.round(v).toLocaleString(), get: (d) => (d.health && d.health.steps != null ? d.health.steps : null) },
       { max: stepMax, ticks: ticksFor(stepMax), id: 'c3' });
+
+    // 歩き方のグラフ(値が 2 日以上ある項目だけ。どれも 1 系列 1 グラフ)
+    const lineOf = (k, label, note, unit, dg, id) => {
+      const a = hv(k);
+      if (a.length < 2) return '';
+      const lo = Math.min(...a), hi = Math.max(...a);
+      let min = 0, max, ticks;
+      if (k === 'walking_speed') { // 速さは 0.5 刻み、値のまわりだけ
+        min = Math.max(0, Math.floor(lo - 0.5)); max = Math.ceil(hi + 0.5);
+        ticks = []; for (let t = min; t <= max + 1e-9; t += 0.5) ticks.push(Math.round(t * 10) / 10);
+      } else { max = niceMax(hi * 1.15 || 1); ticks = ticksFor(max); } // 割合は 0 から
+      return `<div class="avoid" style="margin-top:8px">${lineChart(days, { label: `${label}(${unit})`, note, get: (d) => (d.health && d.health[k] != null && d.health[k] !== '' && !isNaN(Number(d.health[k])) ? Number(rnd(Number(d.health[k]), dg)) : null) }, { min, max, ticks, id })}</div>`;
+    };
+    const gaitCharts = lineOf('walking_speed', '歩く速さ', 'iPhone(ポケットに入れて歩いた時)', 'km/時', 2, 'c4') +
+      lineOf('walk_asym', '左右差(歩行非対称性)', 'iPhone。大きいほど左右の差が大きい', '%', 1, 'c5') +
+      lineOf('double_support', '両足支持時間', 'iPhone。大きいほど両足で支える時間が長い', '%', 1, 'c6');
 
     const goodItems = days.filter((d) => d.o && (d.o.easy_times || d.o.good_note)).map((d) => {
       const t = EASY.filter(([k]) => setOf(d.o.easy_times).has(k)).map((x) => x[1]).join('・');
@@ -174,7 +229,8 @@
     <p class="leg">起上・ふら(ふらつき): ○ スムーズ/なし △ ゆっくり/少し × つらそう/目立つ ／ 横 = 横になっていた時間 ／ 外出: 外 外出できた 近 近所だけ – なし ／ 仕事等: 出 会社出勤 残 残業 習 習い事 バ バレエ ／ 食事: 多 よく食べた 普 ふつう 半 半分くらい 少 少し × ほぼ食べず(+間 = 寝る前の間食あり) ／ 見た目 = 不随意運動 1〜5 ／ 朝の薬: ● ${esc(mn)}全部 ◔ ${esc(mn)}一部 ◐ ${esc(mn)}以外 ／ 寝る前の薬: ● 飲んだ ◔ 一部 ○ 飲まなかった(空欄は記録なし。小さな数字は飲んだ時刻) ／ 目覚 = 5分以上目が覚めた回数</p>`;
 
     page.innerHTML = header + note + summary +
-      `<h2>日ごとの推移</h2><div class="avoid">${chart1}</div><div class="avoid" style="margin-top:8px">${chart2}</div><div class="avoid" style="margin-top:8px">${chart3}</div>` +
+      `<h2>日ごとの推移</h2><div class="avoid">${chart1}</div><div class="avoid" style="margin-top:8px">${chart2}</div><div class="avoid" style="margin-top:8px">${chart3}</div>${gaitCharts}` +
+      (profiles ? `<h2>1日の中の変化(歩き方)</h2><p class="src">iPhone が測った時刻ごとの値を、期間全体で時間帯ごと(左)と、朝の薬(${esc(mn)})を飲んでからの時間ごと(右)に平均したもの。グラフの下の数字は測れた回数。iPhone をポケットに入れて歩いた時だけ測られるので、時間帯によって回数に差があります。</p>${profiles}` : '') +
       `<h2>見た目と本人のことば</h2><p class="src">「本人が自分から口にしたこと」(こちらからはたずねていません)と、その日の備考。</p>${list(complaintItems)}` +
       `<h2>楽そうだった時間・できたこと</h2>${list(goodItems)}` +
       `<h2>家族の備考</h2>${list(noteItems)}` +
@@ -183,6 +239,13 @@
     attachTooltip('c1', days, [['見た目', (d) => (d.o && d.o.movement != null ? `${d.o.movement}(${MOVE[d.o.movement]})` : '–')]]);
     attachTooltip('c2', days, [['睡眠', (d) => (d.health && d.health.sleep_min != null ? hm(d.health.sleep_min) : '–')], ['目覚め', (d) => (d.health && d.health.awakenings != null ? d.health.awakenings + '回' : '–')]]);
     attachTooltip('c3', days, [['歩数', (d) => (d.health && d.health.steps != null ? Number(d.health.steps).toLocaleString() + '歩' : '–')]]);
+    [['c4', 'walking_speed', '歩く速さ', 'km/時'], ['c5', 'walk_asym', '左右差', '%'], ['c6', 'double_support', '両足支持時間', '%']].forEach(([id, k, l, u]) =>
+      attachTooltip(id, days, [[l, (d) => {
+        if (!d.health || d.health[k] == null) return '–';
+        const sr = seriesOf(d, k); const vs = sr.map((p) => p[1]);
+        return `平均 ${d.health[k]}${u}` + (sr.length >= 2 ? `(${Math.min(...vs)}〜${Math.max(...vs)}、${sr.length}回)` : '');
+      }]]));
+    profileIds.forEach(([id, bins, fmt, u]) => attachBinTooltip(id, bins, fmt, u));
   }
 
   /* ---------- グラフ(SVG)。どれも 1 系列なので凡例の箱は置かず、見出しで名前を示す ---------- */
@@ -248,6 +311,58 @@
     });
     if (lastIdx >= 0) svg += `<text x="${xBand(lastIdx, n) + bw / 2 + 6}" y="${yOf(Math.min(srs.get(days[lastIdx]), opt.max), opt) + 3}" font-size="9.5" fill="var(--ink-2)">${srs.fmt(srs.get(days[lastIdx]))}</text>`;
     return `${title(srs)}<div class="chart" id="${opt.id}" data-band="1"><svg viewBox="0 0 ${W} ${H}" role="img" aria-label="${esc(srs.label)}の日ごとの推移">${svg}<line class="xh" x1="0" x2="0" y1="${PT}" y2="${H - PB}" stroke="var(--axis)" stroke-width="1" style="display:none"/></svg><div class="tooltip"></div></div>`;
+  }
+  // 1 日の中の変化のグラフ(区分ごとの平均を点で示し、となりあう区分を線で結ぶ。1 系列)
+  const PW = 360, PH = 170, PPL = 36, PPR = 10, PPT = 12, PPB = 32;
+  function niceStep(x) { const p = Math.pow(10, Math.floor(Math.log10(x))); for (const m of [1, 2, 2.5, 5, 10]) if (m * p >= x) return m * p; return 10 * p; }
+  const pxB = (i, n) => PPL + ((i + 0.5) * (PW - PPL - PPR)) / n;
+  function profileChart(bins, srs, id) {
+    const n = bins.length;
+    const vals = bins.filter((b) => b.v != null).map((b) => b.v);
+    const lo = Math.min(...vals), hi = Math.max(...vals);
+    const span = (hi - lo) || Math.abs(hi) * 0.1 || 1;
+    const step = niceStep(span / 3);
+    const min = Math.max(0, Math.floor((lo - span * 0.4) / step) * step), max = Math.ceil((hi + span * 0.4) / step) * step;
+    const y = (v) => PPT + (PH - PPT - PPB) * (1 - (v - min) / (max - min || 1));
+    let svg = '';
+    for (let t = min; t <= max + step * 1e-6; t += step) {
+      const ty = y(t);
+      svg += `<line x1="${PPL}" x2="${PW - PPR}" y1="${ty}" y2="${ty}" stroke="${Math.abs(t - min) < 1e-9 ? 'var(--axis)' : 'var(--grid)'}" stroke-width="1"/><text x="${PPL - 5}" y="${ty + 3}" font-size="9" text-anchor="end" fill="var(--muted)">${Math.round(t * 100) / 100}</text>`;
+    }
+    bins.forEach((b, i) => {
+      svg += `<text x="${pxB(i, n)}" y="${PH - 18}" font-size="9" text-anchor="middle" fill="var(--ink-2)">${b.label}</text><text x="${pxB(i, n)}" y="${PH - 6}" font-size="8" text-anchor="middle" fill="var(--muted)">${b.n ? b.n + '回' : '–'}</text>`;
+    });
+    let path = '', prev = false, pts = '';
+    bins.forEach((b, i) => {
+      if (b.v == null) { prev = false; return; }
+      path += (prev ? 'L' : 'M') + `${pxB(i, n).toFixed(1)} ${y(b.v).toFixed(1)} `;
+      pts += `<circle cx="${pxB(i, n)}" cy="${y(b.v)}" r="6" fill="var(--surface)"/><circle cx="${pxB(i, n)}" cy="${y(b.v)}" r="4" fill="var(--s1)"/>`;
+      prev = true;
+    });
+    // いちばん高い点と低い点だけ、値を書く
+    const iHi = bins.findIndex((b) => b.v === hi), iLo = bins.findIndex((b) => b.v === lo);
+    const lab = (i) => `<text x="${pxB(i, n)}" y="${y(bins[i].v) - 9}" font-size="9" text-anchor="middle" fill="var(--ink-2)">${srs.fmt(bins[i].v)}</text>`;
+    const labels = lab(iHi) + (iLo !== iHi ? lab(iLo) : '');
+    return `${title(srs)}<div class="chart" id="${id}"><svg viewBox="0 0 ${PW} ${PH}" role="img" aria-label="${esc(srs.label)} ${esc(srs.note)}ごとの平均"><path d="${path}" stroke="var(--s1)" stroke-width="2" fill="none" stroke-linejoin="round" stroke-linecap="round"/>${svg}${pts}${labels}<line class="xh" x1="0" x2="0" y1="${PPT}" y2="${PH - PPB}" stroke="var(--axis)" stroke-width="1" style="display:none"/></svg><div class="tooltip"></div></div>`;
+  }
+  function attachBinTooltip(id, bins, fmt, unit) {
+    const box = document.getElementById(id); if (!box) return;
+    const svg = box.querySelector('svg'); const tip = box.querySelector('.tooltip'); const xh = svg.querySelector('.xh');
+    const n = bins.length;
+    svg.addEventListener('mousemove', (e) => {
+      const rect = svg.getBoundingClientRect();
+      const px = ((e.clientX - rect.left) / rect.width) * PW;
+      let best = 0, bd = Infinity;
+      for (let i = 0; i < n; i++) { const dd = Math.abs(pxB(i, n) - px); if (dd < bd) { bd = dd; best = i; } }
+      const b = bins[best];
+      xh.setAttribute('x1', pxB(best, n)); xh.setAttribute('x2', pxB(best, n)); xh.style.display = '';
+      tip.innerHTML = `<b>${b.label}</b><br>${b.v != null ? `平均 ${fmt(b.v)}${unit}(${b.n}回)` : '測れた値なし'}`;
+      tip.style.display = 'block';
+      const lx = (pxB(best, n) / PW) * rect.width;
+      tip.style.left = `${Math.min(rect.width - tip.offsetWidth - 4, lx + 12)}px`;
+      tip.style.top = `${Math.max(0, e.clientY - rect.top - 10)}px`;
+    });
+    svg.addEventListener('mouseleave', () => { tip.style.display = 'none'; xh.style.display = 'none'; });
   }
   function attachTooltip(id, days, rows) {
     const box = document.getElementById(id); if (!box) return;

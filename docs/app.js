@@ -571,9 +571,26 @@
       `<p class="help center" style="margin:2px 0 12px">押した内容はその場で保存されます。</p>`;
   }
 
+  // 歩き方・心拍: その日の平均と、1 日の中の幅(時刻ごとの値 metric_series から)
+  const SERIES_DEFS = [['walking_speed', '歩く速さ', ' km/時'], ['step_length', '歩幅', ' cm'], ['walk_asym', '左右差', '%'], ['double_support', '両足支持', '%'],
+    ['steadiness', '歩行安定性', '%'], ['resting_hr', '安静時心拍', ' 回/分'], ['hrv', '心拍変動', ' ms']];
+  const seriesOf = (h, k) => (h && h.metric_series && Array.isArray(h.metric_series[k]) ? h.metric_series[k] : []);
+  function metricRows(h) {
+    return SERIES_DEFS.map(([k, l, u]) => {
+      const v = h[k];
+      if (v == null || v === '') return '';
+      const sr = seriesOf(h, k); const vs = sr.map((p) => p[1]);
+      const range = sr.length >= 2 ? `<small class="muted"> (${Math.min(...vs)}〜${Math.max(...vs)}・${sr.length}回)</small>` : '';
+      return `<dt>${l}</dt><dd>${esc(String(v))}${/^[\d.]+$/.test(String(v)) ? u : ''}${range}</dd>`;
+    }).join('');
+  }
+  function seriesDetails(h) {
+    const rows = SERIES_DEFS.map(([k, l]) => { const sr = seriesOf(h, k); return sr.length ? `<div><b>${l}</b>${sr.map((p) => `<span>${esc(p[0])} ${esc(String(p[1]))}</span>`).join('')}</div>` : ''; }).join('');
+    return rows ? `<details class="series"><summary>時刻ごとの値</summary>${rows}</details>` : '';
+  }
   function sleepCard(h, s) {
     const hl = healthLink(s);
-    if (!h || (h.sleep_min == null && h.steps == null && h.inbed_min == null)) {
+    if (!h || (h.sleep_min == null && h.steps == null && h.inbed_min == null && !SERIES_DEFS.some(([k]) => h[k] != null && h[k] !== ''))) {
       const last = s.health_last_at ? `最後に届いたのは ${fmtStamp(s.health_last_at, true)} です。` : '';
       const why = hl.consent ? last || '本人の iPhone の設定がすむと、毎日自動で届きます。'
         : '本人の同意と iPhone の設定がすむと、毎日自動で届きます(設定タブ)。';
@@ -586,10 +603,8 @@
         ${h.deep_min != null && h.deep_min > 0 ? `<dt>深い眠り</dt><dd>${h.deep_min}分</dd>` : ''}
         ${h.nap_min ? `<dt>昼寝など</dt><dd>${h.nap_min}分</dd>` : ''}
         ${h.steps != null ? `<dt>歩数</dt><dd>${Number(h.steps).toLocaleString()} 歩</dd>` : ''}
-        ${h.walking_speed != null ? `<dt>歩く速さ</dt><dd>${h.walking_speed} km/時</dd>` : ''}
-        ${h.steadiness ? `<dt>歩行安定性</dt><dd>${esc(h.steadiness)}</dd>` : ''}
-        ${h.resting_hr != null ? `<dt>安静時心拍</dt><dd>${h.resting_hr}</dd>` : ''}
-      </dl><p class="help">目覚め = 5分以上目が覚めた回数。</p>`);
+        ${metricRows(h)}
+      </dl>${seriesDetails(h)}<p class="help">目覚め = 5分以上目が覚めた回数。歩き方は、iPhone をポケットに入れて歩いた時だけ測られます(きょうの分は途中まで)。かっこの中は1日の中の幅と測れた回数。</p>`);
   }
 
   function memoCard(data, date) {
@@ -612,10 +627,17 @@
   const setAbbr = (v, abbr) => { const set = String(v || '').split(','); return abbr.filter(([k]) => set.includes(k)).map(([, a]) => a).join(''); };
   const actAbbr = (v) => { const a = setAbbr(v, [['work', '出'], ['overtime', '残'], ['lesson', '習'], ['ballet', 'バ']]); return a.includes('残') ? a.replace('出', '') : a; };
   const fmtSteps = (n) => (n < 10000 ? String(n) : (n / 10000).toFixed(1).replace(/\.0$/, '') + '万');
-  // [行の名前, 中身, 毎日つける項目か]。中身は (その日の観察, 眠りと歩数, メモの数) から作る
+  // [行の名前, 中身, 毎日つける項目か, その週に値がある時だけ出すか]。中身は (その日の観察, 眠りと歩数, メモの数) から作る
   const LIST_ROWS = {
     sleep: [['睡眠', (o, h) => (h && h.sleep_min != null ? (h.sleep_min / 60).toFixed(1) + 'h' : '')],
-      ['歩数', (o, h) => (h && h.steps != null ? fmtSteps(h.steps) : '')]],
+      ['歩数', (o, h) => (h && h.steps != null ? fmtSteps(h.steps) : '')],
+      ['歩く速さ', (o, h) => (h && h.walking_speed != null ? h.walking_speed.toFixed(1) : ''), 0, 1],
+      ['歩幅', (o, h) => (h && h.step_length != null ? String(Math.round(h.step_length)) : ''), 0, 1],
+      ['左右差', (o, h) => (h && h.walk_asym != null ? h.walk_asym.toFixed(1) : ''), 0, 1],
+      ['両足支持', (o, h) => (h && h.double_support != null ? String(Math.round(h.double_support)) : ''), 0, 1],
+      ['歩行安定性', (o, h) => (h && h.steadiness ? String(h.steadiness) : ''), 0, 1],
+      ['安静時心拍', (o, h) => (h && h.resting_hr != null ? String(Math.round(h.resting_hr)) : ''), 0, 1],
+      ['心拍変動', (o, h) => (h && h.hrv != null ? String(Math.round(h.hrv)) : ''), 0, 1]],
     morning: [['起きた時刻', (o) => String(o.wake_time || '').replace(/^0/, ''), 1], ['起き上がり', (o) => sym(SYM3, o.getup), 1]],
     day: [['ふらつき', (o) => sym(SYM3, o.gait), 1], ['横になった', (o) => sym(['○', '少', '半', '全'], o.lying), 1],
       ['外出', (o) => sym(['無', '近', '外'], o.outing), 1], ['仕事など', (o) => actAbbr(o.activity)],
@@ -629,7 +651,7 @@
     alcohol: [['アルコール', (o) => sym(['無', '有'], o.alcohol), 1]],
     memo: [['メモ', (o, h, n) => (n ? n + '件' : '')]]
   };
-  const LIST_NAMES = { sleep: '眠りと歩数(自動)' };
+  const LIST_NAMES = { sleep: '眠り・歩数・歩き方(自動)' };
   const NOTE_OF = { morning: 'note_morning', day: 'note_day', look: 'complaint_note', meds: 'note_meds', alcohol: 'note_alcohol' };
   const NOTE_LABELS = [['note_morning', '朝'], ['note_day', '日中'], ['complaint_note', '見た目・ことば'], ['good_note', 'できたこと'], ['note_meds', '薬'], ['note_alcohol', 'アルコール']];
   let listPage = 0;        // 0 = きょうまでの 7 日、1 = その前の 7 日 …
@@ -662,7 +684,8 @@
     }).join('')}</tr>`;
     const body = cardOrder(s).map((k) => {
       const name = LIST_NAMES[k] || (CARD_DEFS.find((c) => c[0] === k) || [k, k])[1];
-      let rows = (LIST_ROWS[k] || []).map(([label, fn, core]) => `<tr><td class="lbl">${label}</td>${days.map((d) => {
+      const val = (fn, d) => fn(obsBy[d] || {}, hBy[d], (memoBy[d] || []).length);
+      let rows = (LIST_ROWS[k] || []).filter(([, fn, , auto]) => !auto || days.some((d) => val(fn, d))).map(([label, fn, core]) => `<tr><td class="lbl">${label}</td>${days.map((d) => {
         const v = fn(obsBy[d] || {}, hBy[d], (memoBy[d] || []).length);
         return td(d, v ? esc(v) : core ? miss : '');
       }).join('')}</tr>`).join('');
@@ -680,7 +703,8 @@
       <li>仕事など: 出 会社出勤 残 出勤+残業 習 習い事 バ バレエ</li>
       <li>食事: 多 よく食べた 普 ふつう 半 半分くらい 少 少し × ほぼ食べず / 間食: ● 寝る前の間食</li>
       <li>見た目: 不随意運動 1〜5 / ことば: 痛 痛み ぐ ぐるぐる 他 その他</li>
-      <li>楽な時間: 朝 昼 夕 夜 / 薬: ● 全部・飲んだ ◐ ${esc(medName(s))}以外 ◔ 一部 ○ 飲まなかった</li></ul></details>`;
+      <li>楽な時間: 朝 昼 夕 夜 / 薬: ● 全部・飲んだ ◐ ${esc(medName(s))}以外 ◔ 一部 ○ 飲まなかった</li>
+      <li>歩く速さ km/時 / 歩幅 cm / 左右差(歩行非対称性)・両足支持(両足で支えている時間)・歩行安定性 % / 安静時心拍 回/分 / 心拍変動 ms(歩き方は iPhone をポケットに入れて歩いた日だけ)</li></ul></details>`;
     const notes = days.slice().reverse().map((d) => {
       const o = obsBy[d] || {};
       const items = NOTE_LABELS.filter(([k]) => o[k]).map(([k, l]) => `<li><b>${l}</b>${esc(o[k])}</li>`)
@@ -896,9 +920,9 @@
     }
     if (!hl.consent) {
       return wrapSheet(`<h3>眠りと歩いた量を、${sup}に届ける</h3>
-        <p class="small" style="margin-bottom:12px">Apple Watch と iPhone が記録している「眠り」と「歩いた量」を、毎日自動で${sup}のメモに届けます。診察のときに先生に見せる資料にもなります。</p>
+        <p class="small" style="margin-bottom:12px">Apple Watch と iPhone が記録している「眠り」「歩いた量と歩き方」「心拍」を、毎日自動で${sup}のメモに届けます。診察のときに先生に見せる資料にもなります。</p>
         <dl class="kv consent">
-          <dt>届けるもの</dt><dd>眠った時間、寝た時刻と起きた時刻、途中で目が覚めた回数、歩数</dd>
+          <dt>届けるもの</dt><dd>眠った時間、寝た時刻と起きた時刻、途中で目が覚めた回数、歩数、歩き方(歩く速さ・歩幅・左右の差・両足で支えている時間・歩行安定性)、安静時の心拍数と心拍変動(それぞれ測った時刻も)</dd>
           <dt>届く先</dt><dd>家族の Google スプレッドシートだけ。見るのは${sup}と、先生に見せる資料</dd>
           <dt>届く時</dt><dd>毎日自動で。この iPhone で何かを押す必要はありません</dd>
           <dt>やめたい時</dt><dd>いつでも。この画面の「やめる」を押すか、${sup}に言えば止まります</dd>
