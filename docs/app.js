@@ -7,7 +7,7 @@
   'use strict';
 
   /* ========== 保存(localStorage) ========== */
-  const KEYS = { cfg: 'kuma.cfg', state: 'kuma.state3', queue: 'kuma.queue', idmap: 'kuma.idmap', thanked: 'kuma.thanked', look: 'kuma.look' };
+  const KEYS = { cfg: 'kuma.cfg', state: 'kuma.state3', queue: 'kuma.queue', idmap: 'kuma.idmap', thanked: 'kuma.thanked', look: 'kuma.look', prnNames: 'kuma.prnNames' };
   function load(k, def) { try { const v = localStorage.getItem(k); return v === null ? def : JSON.parse(v); } catch (e) { return def; } }
   function save(k, v) { try { localStorage.setItem(k, JSON.stringify(v)); } catch (e) { /* 保存できない環境でも動かす */ } }
 
@@ -104,7 +104,11 @@
   const hmKey = (t) => { const [h, m] = t.split(':').map(Number); return (h < 4 ? h + 24 : h) * 60 + m; }; // 深夜は前の日の続き
   // 寝る前の薬が「早い」時刻(朝 4 時〜夕方 17 時台)か。深夜 0〜3 時台は前の日の夜の続きなので含めない(サーバーと同じ決まり)
   const isEarlyNight = (v) => { const m = parseMed(v); return (m.st === 'yes' || m.st === 'part') && /^(0[4-9]|1[0-7]):[0-5]\d$/.test(m.t); };
+  // 他の薬(頓服など)の記録。1 回分は「時刻」か「時刻 薬の名前」(例: '13:20 痛み止め')で、カンマでつなぐ
   const prnList = (o) => String((o && o.prn_times) || '').split(',').filter(Boolean);
+  const prnItem = (s) => { const i = s.indexOf(' '); return i < 0 ? { t: s, name: '' } : { t: s.slice(0, i), name: s.slice(i + 1) }; };
+  const prnClean = (v) => String(v || '').replace(/[,，]/g, '、').replace(/\s+/g, ' ').trim().slice(0, 30);
+  const prnStr = (t, name) => { const n = prnClean(name); return n ? t + ' ' + n : t; };
 
   /* ========== 画像とリアクション ==========
    * もとの設定は docs/images/images.js(window.KUMA_IMAGES)。サイトの「くま」タブで選んだ画像と
@@ -565,11 +569,15 @@
       const m = parseMed(o[f], f === 'med_morning');
       return `<div class="obs-field"><div class="obs-label">${title}</div><div class="chips">${states.map(([k, l]) => medBtn(f, k, l, title, m)).join('')}</div>${f === 'med_night' ? earlyBox(o) : ''}</div>`;
     }).join('');
-    const times = prnList(o);
-    const prn = `<div class="obs-field"><div class="obs-label">頓服(必要な時の薬)</div><div class="chips">
-        <button class="chip-btn med" data-act="prn-add" data-lp="prn" data-label="頓服を飲んだ">頓服を飲んだ</button>
-        ${times.map((t, i) => `<span class="pill">${t}<button class="pill-x" data-act="prn-del" data-i="${i}" aria-label="${t} の頓服を取り消す">×</button></span>`).join('')}
-        ${!times.length && o.prn ? `<span class="pill">${o.prn}回(時刻なし)</span>` : ''}</div></div>`;
+    const items = prnList(o).map(prnItem);
+    const recent = prnRecent(o);
+    const prn = `<div class="obs-field"><div class="obs-label">他の薬(頓服など)</div>
+        <div class="row prn-row"><input type="text" id="prn-name" maxlength="30" value="${esc(prnDraft)}" placeholder="薬の名前(例: 痛み止め)" aria-label="他の薬の名前" enterkeyhint="done" autocomplete="off">
+          <button class="chip-btn med" data-act="prn-add" data-lp="prn" data-label="他の薬を飲んだ">他の薬を飲んだ</button></div>
+        ${recent.length ? `<div class="chips prn-recent">${recent.map((n) => `<button class="chip-btn ${n === prnDraft ? 'sel' : ''}" data-act="prn-name" data-name="${esc(n)}" aria-pressed="${n === prnDraft}">${esc(n)}</button>`).join('')}</div>` : ''}
+        ${items.length || o.prn ? `<div class="chips prn-items">${items.map((p, i) => `<span class="pill"><button class="pill-t" data-act="prn-edit" data-i="${i}" aria-label="${p.t} ${esc(p.name)} の時刻と名前を直す">${p.t}${p.name ? ` ${esc(p.name)}` : ''}</button><button class="pill-x" data-act="prn-del" data-i="${i}" aria-label="${p.t} ${esc(p.name)} を取り消す">×</button></span>`).join('')}
+          ${!items.length && o.prn ? `<span class="pill">${o.prn}回(時刻なし)</span>` : ''}</div>` : ''}
+        ${items.length ? '' : `<p class="help">名前を入れてから(下の名前を押しても入ります)「他の薬を飲んだ」を押すと、${isToday ? '今の時刻で記録します' : '時刻を入れる欄が開きます'}。名前は空でも記録できます。記録したあと、記録を押すと時刻と名前を直せます。</p>`}</div>`;
     const medHelp = `<p class="help">${isToday ? '押すと今の時刻で記録します。<b>長押し</b>すると時刻を入れられます。' : '前の日の分は、押すと時刻を入れる欄が開きます。'}もう一度押すと取り消せます。${s.med2_label ? '' : '<br>「設定」タブの「朝の薬で分けて書く薬の名前」を入れると、ボタンにその名前が出ます。'}</p>`;
     const snack = `<button class="chip-btn snack ${o.night_snack === 1 ? 'sel' : ''}" data-act="obs" data-f="night_snack" data-v="1" aria-pressed="${o.night_snack === 1}">寝る前の間食</button>`;
     const cards = {
@@ -664,7 +672,7 @@
   /* ---- 一覧: 項目ごとの記録状況を 7 日ずつ ---- */
   const SYM3 = ['○', '△', '×'];
   const MED_SYM = { all: '●', yes: '●', noc: '◐', part: '◔', no: '○', '': '' };
-  // 毎日つける項目(「記録した数」に数える)。間食・ことば・頓服・仕事などは、あった日だけ押すので数えない
+  // 毎日つける項目(「記録した数」に数える)。間食・ことば・他の薬・仕事などは、あった日だけ押すので数えない
   const CORE = ['wake_time', 'getup', 'gait', 'lying', 'outing', 'meal', 'movement', 'med_morning', 'med_night', 'alcohol'];
   const filled = (v) => v != null && v !== '';
   const coreCount = (o) => CORE.filter((k) => filled(o && o[k])).length;
@@ -695,7 +703,7 @@
       ['できたこと', (o) => (o.good_note ? '✎' : '')]],
     meds: [['朝の薬', (o) => MED_SYM[parseMed(o.med_morning, true).st] || '', 1], ['寝る前の薬', (o) => MED_SYM[parseMed(o.med_night).st] || '', 1],
       ['早く休んだ', (o) => (o.early_bed === 1 ? '●' : ''), 0, 1],
-      ['頓服', (o) => { const n = prnList(o).length || o.prn || 0; return n ? n + '回' : ''; }]],
+      ['他の薬', (o) => { const n = prnList(o).length || o.prn || 0; return n ? n + '回' : ''; }]],
     alcohol: [['アルコール', (o) => sym(['無', '有'], o.alcohol), 1]],
     memo: [['メモ', (o, h, n) => (n ? n + '件' : '')]]
   };
@@ -814,7 +822,7 @@
     codes.easy_times = { label: '楽そうだった時間帯', values: Object.fromEntries(EASY) };
     codes.complaint = { label: '本人が自分から口にしたこと(こちらからはたずねていない)', values: Object.fromEntries(COMPLAINT) };
     medRows(s).forEach(([f, label, states]) => { codes[f] = { label: label + '(「状態 時刻」)', values: Object.fromEntries(states.concat([['no', '飲まなかった']])) }; });
-    codes.prn_times = { label: '頓服を飲んだ時刻(カンマ区切り)' };
+    codes.prn_times = { label: '他の薬(頓服など)を飲んだ記録。1回分は「時刻」か「時刻 薬の名前」で、カンマ区切り。prn はその回数' };
     codes.health = {
       sleep_min: '眠った時間(分)', awakenings: '5分以上目が覚めた回数', deep_min: '深い眠り(分)', rem_min: 'レム睡眠(分)', inbed_min: 'ベッドにいた時間(分)',
       nap_min: '昼寝など(分)', bed_start: '寝た時刻', bed_end: '起きた時刻', steps: '歩数', walking_speed: '歩く速さ(km/時)', step_length: '歩幅(cm)',
@@ -851,7 +859,7 @@
       ['朝の薬', (d, o) => medState[parseMed(o.med_morning, true).st] || ''], ['朝の薬の時刻', (d, o) => parseMed(o.med_morning, true).t],
       ['寝る前の薬', (d, o) => medState[parseMed(o.med_night).st] || ''], ['寝る前の薬の時刻', (d, o) => parseMed(o.med_night).t],
       ['早く休んだ', (d, o) => (o.early_bed === 1 ? 'はい' : '')],
-      ['頓服の時刻', (d, o) => prnList(o).join(' ')], ['アルコール', (d, o) => name('alcohol', o.alcohol)],
+      ['他の薬(時刻と名前)', (d, o) => prnList(o).join(' / ')], ['アルコール', (d, o) => name('alcohol', o.alcohol)],
       ['睡眠(分)', (d, o, h) => h.sleep_min], ['目覚め(回)', (d, o, h) => h.awakenings], ['深い眠り(分)', (d, o, h) => h.deep_min], ['昼寝など(分)', (d, o, h) => h.nap_min],
       ['寝た時刻', (d, o, h) => h.bed_start], ['起きた時刻(眠り)', (d, o, h) => h.bed_end], ['歩数', (d, o, h) => h.steps],
       ['歩く速さ(km/時)', (d, o, h) => h.walking_speed], ['歩幅(cm)', (d, o, h) => h.step_length], ['歩行非対称性(%)', (d, o, h) => h.walk_asym],
@@ -1147,19 +1155,31 @@
   }
 
   // 薬を飲んだ時刻を入れる(長押し・前の日・「時刻を変える」から)
+  // 他の薬(prn)は、replace に直したい記録("13:20 痛み止め")を渡す。新しく記録する時は、入れかけの名前を使う
   function openMedTime(f, v, label, replace) {
-    let time = nowHm();
-    if (f === 'prn') { if (replace) time = replace; }
-    else { const m = parseMed(obsNow()[f], f === 'med_morning'); if (m.st === v && m.t) time = m.t; }
-    sheet = { type: 'medtime', f, v, label, time, replace: replace || null };
+    let time = nowHm(), name = '';
+    if (f === 'prn') {
+      if (replace) { const p = prnItem(replace); time = p.t; name = p.name; }
+      else {
+        const inp = document.getElementById('prn-name');
+        if (inp) { prnDraft = inp.value; if (document.activeElement === inp) inp.blur(); } // 入力中のままだと、記録したあと描き直されない
+        name = prnDraft;
+      }
+    } else { const m = parseMed(obsNow()[f], f === 'med_morning'); if (m.st === v && m.t) time = m.t; }
+    sheet = { type: 'medtime', f, v, label, time, name, replace: replace || null };
     renderOverlay();
   }
   function medTimeSheetHTML() {
+    const isPrn = sheet.f === 'prn';
+    const recent = isPrn ? prnRecent(obsNow()) : [];
+    const nameField = isPrn ? `<label class="field"><span>薬の名前(空でも記録できます)</span><input type="text" id="med-name" maxlength="30" value="${esc(sheet.name || '')}" placeholder="例: 痛み止め" enterkeyhint="done" autocomplete="off"></label>
+      ${recent.length ? `<div class="chips prn-recent" style="margin:-4px 0 10px">${recent.map((n) => `<button class="chip-btn ${n === sheet.name ? 'sel' : ''}" data-act="prn-name" data-name="${esc(n)}" aria-pressed="${n === sheet.name}">${esc(n)}</button>`).join('')}</div>` : ''}` : '';
     return wrapSheet(`<h3>${esc(sheet.label)}</h3>
+      ${nameField}
       <label class="field"><span>飲んだ時刻(4桁の数字。例: 0815 = 8時15分)</span>${hmInput('id="med-time" aria-label="飲んだ時刻(4桁)"', sheet.time)}</label>
       <p class="help" id="med-time-view">${esc(hmView(sheet.time))}</p>
       ${curDate !== logicalToday() ? `<p class="help">${jpDate(curDate)}の分として記録します。深夜 0〜3 時台の時刻は、その前の日の夜の分になります。</p>` : ''}
-      <div class="actions"><button class="btn primary" data-act="medtime-save">この時刻で記録</button><button class="btn ghost" data-act="sheet-close">やめる</button></div>`);
+      <div class="actions"><button class="btn primary" data-act="medtime-save">${isPrn && sheet.replace ? 'この内容に直す' : 'この時刻で記録'}</button><button class="btn ghost" data-act="sheet-close">やめる</button></div>`);
   }
   function hmView(v) {
     const t = parseHm(v);
@@ -1171,17 +1191,42 @@
   function medTimeSave() {
     const t = parseHm(sheet.time);
     if (!t) { toast('時刻を4桁の数字で入れてください(例: 0815)'); return; }
-    const { f, v, label, replace } = sheet;
+    const { f, v, label, replace, name } = sheet;
     sheet = null; renderOverlay();
-    if (f === 'prn') {
-      const list = prnList(obsNow());
-      if (replace) { const i = list.indexOf(replace); if (i >= 0) list.splice(i, 1); }
-      list.push(t); savePrn(list);
-    } else saveObs({ [f]: `${v} ${t}` });
+    if (f === 'prn') { addPrn(t, name, replace); return; }
+    saveObs({ [f]: `${v} ${t}` });
     if (!askEarly(f)) toast(`${label} ${t} で記録しました`);
   }
+
+  // 他の薬(頓服など): 入れかけの名前と、前に使った名前(この端末に覚える。最大 6 つ)
+  let prnDraft = '';
+  let prnNames = load(KEYS.prnNames, []);
+  if (!Array.isArray(prnNames)) prnNames = [];
+  function prnRecent(o) {
+    const all = prnNames.concat(prnList(o).map((s) => prnItem(s).name));
+    return all.filter((n, i) => n && all.indexOf(n) === i).slice(0, 6);
+  }
+  function prnRemember(n, forget) {
+    const next = (n ? [n] : []).concat(prnNames.filter((x) => x !== n && x !== forget)).slice(0, 6);
+    if (JSON.stringify(next) !== JSON.stringify(prnNames)) { prnNames = next; save(KEYS.prnNames, prnNames); }
+  }
+  // 記録を足す(replace があれば、その記録を直す)。名前を直した時は、前の名前(打ちまちがい)を候補から外す
+  function addPrn(t, name, replace) {
+    const item = prnStr(t, name);
+    const nm = prnItem(item).name;
+    const list = prnList(obsNow());
+    if (replace) { const i = list.indexOf(replace); if (i >= 0) list.splice(i, 1); }
+    else prnDraft = '';
+    list.push(item);
+    const old = replace ? prnItem(replace).name : '';
+    prnRemember(nm, old && !list.some((s) => prnItem(s).name === old) ? old : '');
+    savePrn(list);
+    const what = `他の薬${nm ? `(${nm})` : ''} ${t}`;
+    if (replace) toast(`${what} に直しました`);
+    else toast(`${what} で記録しました`, { label: '直す', onClick: () => { if (prnList(obsNow()).includes(item)) openMedTime('prn', '', '他の薬を直す', item); } });
+  }
   function savePrn(list) {
-    list.sort((a, b) => hmKey(a) - hmKey(b));
+    list.sort((a, b) => hmKey(prnItem(a).t) - hmKey(prnItem(b).t));
     saveObs({ prn_times: list.join(','), prn: list.length || null });
   }
 
@@ -1484,15 +1529,27 @@
         break;
       }
       case 'prn-add': {
-        if (curDate !== logicalToday()) { openMedTime('prn', '', '頓服を飲んだ'); break; }
-        const t = nowHm();
-        const list = prnList(obsNow()); list.push(t); savePrn(list);
-        toast(`頓服 ${t} で記録しました`, { label: '時刻を変える', onClick: () => openMedTime('prn', '', '頓服を飲んだ', t) });
+        if (curDate !== logicalToday()) { openMedTime('prn', '', '他の薬を飲んだ'); break; } // 前の日は時刻を入れてもらう
+        const inp = document.getElementById('prn-name'); if (inp) prnDraft = inp.value;
+        addPrn(nowHm(), prnDraft);
+        break;
+      }
+      case 'prn-name': { // 前に使った名前を押すと、名前の欄に入る(もう一度押すと空に)
+        const n = el.dataset.name;
+        if (sheet && sheet.type === 'medtime' && el.closest('#overlay')) { sheet.name = sheet.name === n ? '' : n; renderOverlay(); break; }
+        const inp = document.getElementById('prn-name'); if (inp) prnDraft = inp.value;
+        prnDraft = prnClean(prnDraft) === n ? '' : n;
+        render();
+        break;
+      }
+      case 'prn-edit': {
+        const s = prnList(obsNow())[parseInt(el.dataset.i, 10)];
+        if (s) openMedTime('prn', '', '他の薬を直す', s);
         break;
       }
       case 'prn-del': {
-        const list = prnList(obsNow()); const t = list[parseInt(el.dataset.i, 10)];
-        if (t && confirm(`${t} の頓服を取り消しますか？`)) { list.splice(list.indexOf(t), 1); savePrn(list); }
+        const list = prnList(obsNow()); const s = list[parseInt(el.dataset.i, 10)];
+        if (s && confirm(`他の薬「${prnItem(s).name ? prnItem(s).t + ' ' + prnItem(s).name : prnItem(s).t}」を取り消しますか？`)) { list.splice(list.indexOf(s), 1); savePrn(list); }
         break;
       }
       case 'medtime-save': medTimeSave(); break;
@@ -1624,8 +1681,10 @@
   // シートの入力中の文字を覚えておく(描き直しても消えないように)
   document.addEventListener('input', (e) => {
     if (e.target.classList && e.target.classList.contains('note')) fitNote(e.target);
+    if (e.target.id === 'prn-name') { prnDraft = e.target.value; return; }
     if (!sheet) return;
     const t = e.target;
+    if (t.id === 'med-name') sheet.name = t.value;
     if (t.id === 'memo-text') sheet.text = t.value;
     if (t.id === 'med-time') { sheet.time = t.value; const v = document.getElementById('med-time-view'); if (v) v.textContent = hmView(t.value); }
     if (t.id === 'react-label') { sheet.label = t.value; const b = document.querySelector('.react-preview b'); if (b) b.textContent = t.value || '…'; }
@@ -1640,6 +1699,7 @@
   document.addEventListener('keydown', (e) => {
     if (e.key === 'Enter' && e.target && e.target.id === 'med-time') { e.preventDefault(); medTimeSave(); }
     else if (e.key === 'Enter' && e.target && e.target.dataset && e.target.dataset.obsHm) e.target.blur();
+    else if (e.key === 'Enter' && e.target && (e.target.id === 'prn-name' || e.target.id === 'med-name')) { e.preventDefault(); e.target.blur(); }
   });
 
   document.addEventListener('submit', (e) => {

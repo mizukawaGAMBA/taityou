@@ -33,7 +33,9 @@
   const MED_SYM = { all: '●', yes: '●', noc: '◐', part: '◔', no: '○' };
   // "all 08:10" → { st: 'all', t: '08:10' }。前の版の朝の "yes" は「全部飲んだ」として読む
   const parseMed = (v, morning) => { const [st0, t] = String(v || '').split(' '); return { st: morning && st0 === 'yes' ? 'all' : (st0 || ''), t: t || '' }; };
+  // 他の薬(頓服など)。1 回分は「時刻」か「時刻 薬の名前」
   const prnList = (o) => String((o && o.prn_times) || '').split(',').filter(Boolean);
+  const prnItem = (s) => { const i = s.indexOf(' '); return i < 0 ? { t: s, name: '' } : { t: s.slice(0, i), name: s.slice(i + 1) }; };
   // カテゴリーごとの備考(記録の画面の並びと同じ)
   const NOTES = [['note_morning', '朝'], ['note_day', '日中'], ['note_meds', '薬'], ['note_alcohol', 'アルコール']];
   const setOf = (v) => new Set(String(v || '').split(',').filter(Boolean));
@@ -142,6 +144,11 @@
       return `${esc(label)}: ${states.map(([k, l]) => `${esc(l)} ${cnt[k]}日`).join(' / ')} <small>/ 記録なし ${none}日</small>`;
     };
     const prnTotal = days.reduce((a, d) => a + (d.o ? Math.max(d.o.prn || 0, prnList(d.o).length) : 0), 0);
+    // 薬の名前ごとの回数(名前のない記録は「名前なし」)
+    const prnByName = {};
+    days.forEach((d) => { if (!d.o) return; const its = prnList(d.o).map(prnItem); its.forEach((p) => { const k = p.name || '名前なし'; prnByName[k] = (prnByName[k] || 0) + 1; }); if (!its.length && d.o.prn) prnByName['名前なし'] = (prnByName['名前なし'] || 0) + d.o.prn; });
+    const prnNamed = Object.keys(prnByName).some((k) => k !== '名前なし');
+    const prnBreak = prnNamed ? '(' + Object.keys(prnByName).sort((a, b) => (a === '名前なし') - (b === '名前なし') || prnByName[b] - prnByName[a]).map((k) => esc(k) + ' ' + prnByName[k] + '回').join('、') + ')' : '';
     const snackDays = days.filter((d) => d.o && d.o.night_snack === 1).length;
     const earlyDays = days.filter((d) => d.o && d.o.early_bed === 1).length;
     const actDays = (k) => days.filter((d) => d.o && setOf(d.o.activity).has(k)).length;
@@ -168,7 +175,7 @@
       ${gaitText ? `<tr><th>歩き方(iPhone、期間の平均)</th><td>${gaitText}<br><small>iPhone をポケットに入れて歩いた時に自動で測られる値。左右差・両足支持時間は大きいほど、歩く速さ・歩幅・歩行安定性は小さいほど、歩きにくさの目安</small></td></tr>` : ''}
       ${heartText ? `<tr><th>心拍(Apple Watch、期間の平均)</th><td>${heartText}</td></tr>` : ''}
       ${rangeSummary ? `<tr><th>歩き方の1日の中の変動(iPhone)</th><td>1日の最大と最小の差の平均: ${rangeSummary}<br><small>2回以上測れた日だけ。時間帯ごとの違いは「1日の中の変化」のグラフ</small></td></tr>` : ''}
-      <tr><th>服薬(家族の確認)</th><td>${MEDS.map(medRow).join('<br>')}<br><small>頓服 合計 ${prnTotal}回${earlyDays ? ` / 早く休んだ日(寝る前の薬が18時より前) ${earlyDays}日` : ''}</small></td></tr>
+      <tr><th>服薬(家族の確認)</th><td>${MEDS.map(medRow).join('<br>')}<br><small>他の薬(頓服など) 合計 ${prnTotal}回${prnBreak}${earlyDays ? ` / 早く休んだ日(寝る前の薬が18時より前) ${earlyDays}日` : ''}</small></td></tr>
       <tr><th>アルコール</th><td>あり ${alcoholDays}日 <small>(記録 ${alcoholKnown}日中)</small></td></tr>
       <tr><th>本人が自分から訴えた日</th><td>${countSet('complaint', COMPLAINT)} <small>(こちらからはたずねていません)</small></td></tr>
       <tr><th>楽そうだった時間帯</th><td>${countSet('easy_times', EASY)}</td></tr>
@@ -218,9 +225,9 @@
       const early = f === 'med_night' && d.o && d.o.early_bed === 1 ? '<small>早</small>' : '';
       return m.st ? `${MED_SYM[m.st] || ''}${m.t ? `<small>${m.t}</small>` : ''}${early}` : '';
     };
-    const prnCell = (d) => { if (!d.o) return ''; const t = prnList(d.o); return t.length ? `${t.length}<small>${t.join(' ')}</small>` : (d.o.prn ? d.o.prn : ''); };
+    const prnCell = (d) => { if (!d.o) return ''; const t = prnList(d.o).map(prnItem); return t.length ? `${t.length}<small>${t.map((p) => esc(p.name ? p.t + ' ' + p.name : p.t)).join('<br>')}</small>` : (d.o.prn ? d.o.prn : ''); };
     const table = `<table class="days"><thead><tr><th>日付</th><th>起床</th><th class="c">起上</th><th class="c">ふら</th><th class="c">横</th><th class="c">外出</th><th class="c">仕事等</th><th class="c">食事</th><th class="c">見た目</th>
-      ${MEDS.map(([, l]) => `<th class="c med">${esc(l)}</th>`).join('')}<th class="num">頓服</th><th class="c med">アルコール</th><th class="num">睡眠</th><th class="num">目覚</th><th class="num">歩数</th></tr></thead><tbody>
+      ${MEDS.map(([, l]) => `<th class="c med">${esc(l)}</th>`).join('')}<th class="num">他の薬</th><th class="c med">アルコール</th><th class="num">睡眠</th><th class="num">目覚</th><th class="num">歩数</th></tr></thead><tbody>
       ${days.map((d) => `<tr><td>${md(d.date)} <span style="color:var(--muted)">${DOW[dowOf(d.date)]}</span></td>
         <td>${d.o && d.o.wake_time ? d.o.wake_time : ''}</td>
         <td class="c">${cell('getup', d)}</td><td class="c">${cell('gait', d)}</td><td class="c">${cell('lying', d)}</td><td class="c">${cell('outing', d)}</td><td class="c">${d.o ? ACT_SYM.filter(([k]) => setOf(d.o.activity).has(k)).map((x) => x[1]).join('') : ''}</td><td class="c">${cell('meal', d)}${d.o && d.o.night_snack === 1 ? '<small>+間</small>' : ''}</td>

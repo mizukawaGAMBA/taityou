@@ -273,7 +273,7 @@ function toCell(v) {
  * 日付は「論理日」(午前4時区切り)の "YYYY-MM-DD" 文字列。時刻は "HH:MM"。
  * ===================================================================== */
 var Core = (function () {
-  var VERSION = 10;
+  var VERSION = 11;
   var IMAGE_PARTS = 10;       // 1 枚の画像を最大 10 個のセルに分けて入れる
   var IMAGE_CHUNK = 40000;    // 1 セルに入れる文字数(セルの上限は 50,000 文字)
   var IMAGE_META_COLS = 7;    // 画像の表の、データ以外の列の数
@@ -286,7 +286,7 @@ var Core = (function () {
     observe:      ['date', 'wake_time', 'getup', 'gait', 'lying', 'outing', 'meal', 'movement',
                    'med_morning', 'med_extra', 'med_night', 'prn', 'alcohol',
                    'easy_times', 'good_note', 'complaint', 'complaint_note', 'recorded_by', 'updated_at',
-                   // v4 で右に足した列(カテゴリーごとの備考、寝る前の間食、頓服の時刻)
+                   // v4 で右に足した列(カテゴリーごとの備考、寝る前の間食、他の薬(頓服など)の時刻と名前)
                    'note_morning', 'note_day', 'note_meds', 'note_alcohol', 'night_snack', 'prn_times',
                    // v5: 仕事・習い事(会社出勤、残業、習い事、バレエ)
                    'activity',
@@ -340,7 +340,8 @@ var Core = (function () {
   // 薬: 朝は "all" (分けて書く薬も)全部 / "part" 一部 / "noc" その薬以外を飲んだ。夜は "yes" 飲んだ / "part" 一部 / "no" 飲まなかった。
   // 時刻は "all 08:10" のように後ろに付ける(v3 の朝の "yes" も読めるように残す)
   var MED_RE = /^(?:(?:yes|all|part|noc)(?: (?:[01]\d|2[0-3]):[0-5]\d)?|no)$/;
-  var PRN_TIMES_RE = /^(?:(?:[01]\d|2[0-3]):[0-5]\d)(?:,(?:[01]\d|2[0-3]):[0-5]\d){0,19}$/;
+  // 他の薬(頓服など)1 回分: "13:20" か、名前つきの "13:20 痛み止め"(名前は 30 文字まで)
+  var PRN_ITEM_RE = /^(?:[01]\d|2[0-3]):[0-5]\d(?: [^,]{1,30})?$/;
   // 寝る前の薬が「早い」時刻(朝 4 時〜夕方 17 時台)。深夜 0〜3 時台は前の日の夜の続きなので含めない
   var EARLY_NIGHT_RE = /^(?:yes|part) (?:0[4-9]|1[0-7]):[0-5]\d$/;
   var SLOT_KEYS = ['title', 'loading', 'normal', 'sleepy', 'love', 'happy', 'role_patient', 'role_supporter'];
@@ -858,14 +859,19 @@ var Core = (function () {
       set(f, v);
     });
     if ('prn_times' in req) {
-      // 頓服を飲んだ時刻の一覧("13:20,18:05")。回数は時刻の数
-      var pt = (Array.isArray(req.prn_times) ? req.prn_times.join(',') : toStr(req.prn_times)).replace(/\s/g, '');
-      if (pt && !PRN_TIMES_RE.test(pt)) throw fail('bad_request', '頓服の時刻の形が正しくありません');
+      // 他の薬(頓服など)を飲んだ記録の一覧("13:20 痛み止め,18:05")。1 回分は「時刻」か「時刻 薬の名前」。回数は記録の数
+      var items = (Array.isArray(req.prn_times)
+        ? req.prn_times.map(function (x) { return toStr(x).replace(/,/g, '、'); })
+        : toStr(req.prn_times).split(','))
+        .map(function (x) { return x.replace(/\s+/g, ' ').trim(); })
+        .filter(function (x) { return x; });
+      if (items.length > 20 || items.some(function (x) { return !PRN_ITEM_RE.test(x); })) throw fail('bad_request', '他の薬の記録の形が正しくありません');
+      var pt = items.join(',');
       set('prn_times', pt);
       set('prn', pt ? pt.split(',').length : null);
     } else if ('prn' in req) {
       var p = toInt(req.prn);
-      if (p !== null && (p < 0 || p > 20)) throw fail('bad_request', '頓服の回数が範囲の外です');
+      if (p !== null && (p < 0 || p > 20)) throw fail('bad_request', '他の薬の回数が範囲の外です');
       set('prn', p);
     }
     for (var sk in OBS_SETS) {
