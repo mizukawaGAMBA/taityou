@@ -143,6 +143,7 @@
     };
     const prnTotal = days.reduce((a, d) => a + (d.o ? Math.max(d.o.prn || 0, prnList(d.o).length) : 0), 0);
     const snackDays = days.filter((d) => d.o && d.o.night_snack === 1).length;
+    const earlyDays = days.filter((d) => d.o && d.o.early_bed === 1).length;
     const actDays = (k) => days.filter((d) => d.o && setOf(d.o.activity).has(k)).length;
     const alcoholDays = days.filter((d) => d.o && d.o.alcohol === 1).length;
     const alcoholKnown = days.filter((d) => d.o && d.o.alcohol != null).length;
@@ -167,7 +168,7 @@
       ${gaitText ? `<tr><th>歩き方(iPhone、期間の平均)</th><td>${gaitText}<br><small>iPhone をポケットに入れて歩いた時に自動で測られる値。左右差・両足支持時間は大きいほど、歩く速さ・歩幅・歩行安定性は小さいほど、歩きにくさの目安</small></td></tr>` : ''}
       ${heartText ? `<tr><th>心拍(Apple Watch、期間の平均)</th><td>${heartText}</td></tr>` : ''}
       ${rangeSummary ? `<tr><th>歩き方の1日の中の変動(iPhone)</th><td>1日の最大と最小の差の平均: ${rangeSummary}<br><small>2回以上測れた日だけ。時間帯ごとの違いは「1日の中の変化」のグラフ</small></td></tr>` : ''}
-      <tr><th>服薬(家族の確認)</th><td>${MEDS.map(medRow).join('<br>')}<br><small>頓服 合計 ${prnTotal}回</small></td></tr>
+      <tr><th>服薬(家族の確認)</th><td>${MEDS.map(medRow).join('<br>')}<br><small>頓服 合計 ${prnTotal}回${earlyDays ? ` / 早く休んだ日(寝る前の薬が18時より前) ${earlyDays}日` : ''}</small></td></tr>
       <tr><th>アルコール</th><td>あり ${alcoholDays}日 <small>(記録 ${alcoholKnown}日中)</small></td></tr>
       <tr><th>本人が自分から訴えた日</th><td>${countSet('complaint', COMPLAINT)} <small>(こちらからはたずねていません)</small></td></tr>
       <tr><th>楽そうだった時間帯</th><td>${countSet('easy_times', EASY)}</td></tr>
@@ -212,7 +213,11 @@
     const memos = data.memos.length ? `<ul class="memos">${data.memos.map((m) => `<li><b>${md(m.date)} ${hhmm(m.ts)}</b> ${esc(m.text)}</li>`).join('')}</ul>` : '<p class="empty">なし</p>';
 
     const cell = (key, d) => (d.o && d.o[key] != null ? SC[key].sym[d.o[key]] : '');
-    const medCell = (f, d) => { const m = parseMed(d.o && d.o[f], f === 'med_morning'); return m.st ? `${MED_SYM[m.st] || ''}${m.t ? `<small>${m.t}</small>` : ''}` : ''; };
+    const medCell = (f, d) => {
+      const m = parseMed(d.o && d.o[f], f === 'med_morning');
+      const early = f === 'med_night' && d.o && d.o.early_bed === 1 ? '<small>早</small>' : '';
+      return m.st ? `${MED_SYM[m.st] || ''}${m.t ? `<small>${m.t}</small>` : ''}${early}` : '';
+    };
     const prnCell = (d) => { if (!d.o) return ''; const t = prnList(d.o); return t.length ? `${t.length}<small>${t.join(' ')}</small>` : (d.o.prn ? d.o.prn : ''); };
     const table = `<table class="days"><thead><tr><th>日付</th><th>起床</th><th class="c">起上</th><th class="c">ふら</th><th class="c">横</th><th class="c">外出</th><th class="c">仕事等</th><th class="c">食事</th><th class="c">見た目</th>
       ${MEDS.map(([, l]) => `<th class="c med">${esc(l)}</th>`).join('')}<th class="num">頓服</th><th class="c med">アルコール</th><th class="num">睡眠</th><th class="num">目覚</th><th class="num">歩数</th></tr></thead><tbody>
@@ -226,7 +231,7 @@
         <td class="num">${d.health && d.health.awakenings != null ? d.health.awakenings : ''}</td>
         <td class="num">${d.health && d.health.steps != null ? Number(d.health.steps).toLocaleString() : ''}</td></tr>`).join('')}
     </tbody></table>
-    <p class="leg">起上・ふら(ふらつき): ○ スムーズ/なし △ ゆっくり/少し × つらそう/目立つ ／ 横 = 横になっていた時間 ／ 外出: 外 外出できた 近 近所だけ – なし ／ 仕事等: 出 会社出勤 残 残業 習 習い事 バ バレエ ／ 食事: 多 よく食べた 普 ふつう 半 半分くらい 少 少し × ほぼ食べず(+間 = 寝る前の間食あり) ／ 見た目 = 不随意運動 1〜5 ／ 朝の薬: ● ${esc(mn)}全部 ◔ ${esc(mn)}一部 ◐ ${esc(mn)}以外 ／ 寝る前の薬: ● 飲んだ ◔ 一部 ○ 飲まなかった(空欄は記録なし。小さな数字は飲んだ時刻) ／ 目覚 = 5分以上目が覚めた回数</p>`;
+    <p class="leg">起上・ふら(ふらつき): ○ スムーズ/なし △ ゆっくり/少し × つらそう/目立つ ／ 横 = 横になっていた時間 ／ 外出: 外 外出できた 近 近所だけ – なし ／ 仕事等: 出 会社出勤 残 残業 習 習い事 バ バレエ ／ 食事: 多 よく食べた 普 ふつう 半 半分くらい 少 少し × ほぼ食べず(+間 = 寝る前の間食あり) ／ 見た目 = 不随意運動 1〜5 ／ 朝の薬: ● ${esc(mn)}全部 ◔ ${esc(mn)}一部 ◐ ${esc(mn)}以外 ／ 寝る前の薬: ● 飲んだ ◔ 一部 ○ 飲まなかった(空欄は記録なし。小さな数字は飲んだ時刻。早 = 体調などで早く休んだ日で、その夜の眠りは次の日の行) ／ 目覚 = 5分以上目が覚めた回数</p>`;
 
     page.innerHTML = header + note + summary +
       `<h2>日ごとの推移</h2><div class="avoid">${chart1}</div><div class="avoid" style="margin-top:8px">${chart2}</div><div class="avoid" style="margin-top:8px">${chart3}</div>${gaitCharts}` +

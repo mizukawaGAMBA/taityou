@@ -270,8 +270,8 @@ ol.steps form { margin-top: 4px; }
 /* ---------- トースト ---------- */
 .toast {
   position: fixed; left: 50%; bottom: calc(96px + env(safe-area-inset-bottom)); transform: translateX(-50%); background: var(--ink); color: #fff;
-  padding: 12px 18px; border-radius: 999px; font-weight: 600; z-index: 70; box-shadow: 0 6px 20px rgba(0,0,0,0.2); display: flex; gap: 14px; align-items: center;
-  max-width: calc(100% - 32px); animation: fadein 0.2s ease;
+  padding: 12px 18px; border-radius: 22px; font-weight: 600; z-index: 70; box-shadow: 0 6px 20px rgba(0,0,0,0.2); display: flex; gap: 14px; align-items: center;
+  width: max-content; max-width: calc(100% - 32px); animation: fadein 0.2s ease;
 }
 .toast > span { flex: 1; min-width: 0; }
 .toast button { color: var(--honey); font-weight: 700; min-height: 32px; white-space: nowrap; flex: none; }
@@ -395,3 +395,7 @@ button.cell { border: 2px solid transparent; min-height: 84px; }
   :root { font-size: 17px; }
   .app { padding: 20px 16px 80px; }
 }
+/* 寝る前の薬が 18 時より前の時の確認と「早く休んだ日」 */
+.early-ask { margin-top: 8px; padding: 8px 10px; background: var(--honey-soft); border-radius: 12px; font-size: 0.88rem; line-height: 1.45; }
+.early-ask .chips { margin-top: 6px; }
+.early-note { margin: 6px 0 8px; padding: 6px 10px; background: var(--blue-soft); border-radius: 12px; font-size: 0.85rem; line-height: 1.45; color: var(--ink-2); }

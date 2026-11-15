@@ -7,7 +7,7 @@
   'use strict';
 
   /* ========== 保存(localStorage) ========== */
-  const KEYS = { cfg: 'kuma.cfg', state: 'kuma.state3', queue: 'kuma.queue', idmap: 'kuma.idmap', thanked: 'kuma.thanked' };
+  const KEYS = { cfg: 'kuma.cfg', state: 'kuma.state3', queue: 'kuma.queue', idmap: 'kuma.idmap', thanked: 'kuma.thanked', look: 'kuma.look' };
   function load(k, def) { try { const v = localStorage.getItem(k); return v === null ? def : JSON.parse(v); } catch (e) { return def; } }
   function save(k, v) { try { localStorage.setItem(k, JSON.stringify(v)); } catch (e) { /* 保存できない環境でも動かす */ } }
 
@@ -102,6 +102,8 @@
     return { st: morning && st0 === 'yes' ? 'all' : (st0 || ''), t: t || '' };
   };
   const hmKey = (t) => { const [h, m] = t.split(':').map(Number); return (h < 4 ? h + 24 : h) * 60 + m; }; // 深夜は前の日の続き
+  // 寝る前の薬が「早い」時刻(朝 4 時〜夕方 17 時台)か。深夜 0〜3 時台は前の日の夜の続きなので含めない(サーバーと同じ決まり)
+  const isEarlyNight = (v) => { const m = parseMed(v); return (m.st === 'yes' || m.st === 'part') && /^(0[4-9]|1[0-7]):[0-5]\d$/.test(m.t); };
   const prnList = (o) => String((o && o.prn_times) || '').split(',').filter(Boolean);
 
   /* ========== 画像とリアクション ==========
@@ -186,7 +188,25 @@
     ((cache && cache.reactions) || []).forEach((r) => addRef(r.image));
     return Array.from(ids);
   }
-  async function preloadImages() { await Promise.all(wantedImageIds().map((id) => loadUpImage(id))); }
+  async function preloadImages() { await Promise.all(wantedImageIds().concat(cfg.token ? [] : lookImageIds()).map((id) => loadUpImage(id))); }
+
+  /* ---- ログイン画面の見た目 ----
+   * ログインしている間に、ログイン画面の画像と、本人・記録する人の名前をこの端末に覚えておく(ログアウトしても消さない)。
+   * 名前と登録した画像は公開のサイトには置かないので、一度もログインしていない端末では内蔵のくまと「記録する人」「本人」が出る */
+  let look = load(KEYS.look, {});
+  function rememberLook() {
+    const s = settingsNow();
+    const own = (role) => (cfg.role === role ? String(cfg.name || '').trim() : '');
+    const next = {
+      role: cfg.role || look.role || '', // この端末を最後に使った人(ログイン画面で最初から選んでおく)
+      title: slotRef('title'), role_supporter: slotRef('role_supporter'), role_patient: slotRef('role_patient'),
+      supporter: String(s.supporter_name || '').trim() || own('supporter') || look.supporter || '',
+      patient: String(s.patient_name || '').trim() || own('patient') || look.patient || ''
+    };
+    if (JSON.stringify(next) !== JSON.stringify(look)) { look = next; save(KEYS.look, look); }
+    lookImageIds().forEach((id) => loadUpImage(id)); // ログアウトしたあとも出せるように、端末に保存しておく(保存ずみなら何もしない)
+  }
+  const lookImageIds = () => [look.title, look.role_supporter, look.role_patient].filter((r) => typeof r === 'string' && r.startsWith('u:')).map((r) => r.slice(2));
 
   /* ---- くま(SVG)。画像が無い・読めない時はいつでもこれに戻る ---- */
   function bearSVG(mood, cls) {
@@ -254,8 +274,8 @@
   }
   const pic = (slot, cls, seed) => picFor(slotRef(slot, seed), SLOT_MOOD[slot] || 'normal', cls);
   // 絵文字でも画像でもよい小さな絵(ログインのボタンなど)。def は内蔵の絵文字
-  function picText(slot, def) {
-    const ref = slotRef(slot);
+  function picText(slot, def, refOverride) {
+    const ref = refOverride || slotRef(slot);
     const src = imgSrc(ref);
     if (src && !brokenImgs.has(src)) return `<img class="pic-sm" src="${esc(src)}" alt="" data-def="${esc(def)}">`;
     return esc(ref && !isPicRef(ref) ? ref : def);
@@ -389,10 +409,13 @@
   }
 
   /* ========== 画面: ログイン ========== */
-  let loginRole = 'supporter';
+  let loginRole = look.role === 'patient' ? 'patient' : 'supporter';
+  const lookName = (role) => String(look[role] || '').trim();
+  const loginNamePh = (role) => lookName(role) || (role === 'patient' ? '例: はなこ' : '例: たろう');
   function viewLogin() {
+    const sup = lookName('supporter'), pat = lookName('patient');
     return `<div class="login">
-      <div class="hero">${pic('title', 'bear-bob')}<h1>くま</h1><p class="muted">家族の、ちいさなアプリ</p></div>
+      <div class="hero">${picFor(look.title || slotRef('title'), 'normal', 'bear-bob')}<h1>くま</h1><p class="muted">家族の、ちいさなアプリ</p></div>
       <form id="login-form" class="card">
         ${FIXED_API
           ? `<input type="hidden" name="apiUrl" value="${esc(cfg.apiUrl)}">`
@@ -401,10 +424,10 @@
         <label class="field"><span>家族コード</span><input type="password" name="code" required autocomplete="current-password"></label>
         <span class="small muted" style="display:block;margin-bottom:6px;font-weight:600">この iPhone を使うのは…</span>
         <div class="role-grid">
-          <button type="button" class="btn ${loginRole === 'supporter' ? 'sel' : ''}" data-act="login-role" data-role="supporter">${picText('role_supporter', '🧸')} 記録する人<small class="sub">家族</small></button>
-          <button type="button" class="btn ${loginRole === 'patient' ? 'sel' : ''}" data-act="login-role" data-role="patient">${picText('role_patient', '🐻')} 本人<small class="sub">くまの部屋</small></button>
+          <button type="button" class="btn ${loginRole === 'supporter' ? 'sel' : ''}" data-act="login-role" data-role="supporter">${picText('role_supporter', '🧸', look.role_supporter)} ${esc(sup || '記録する人')}<small class="sub">${sup ? '記録する人' : '家族'}</small></button>
+          <button type="button" class="btn ${loginRole === 'patient' ? 'sel' : ''}" data-act="login-role" data-role="patient">${picText('role_patient', '🐻', look.role_patient)} ${esc(pat || '本人')}<small class="sub">${pat ? '本人・くまの部屋' : 'くまの部屋'}</small></button>
         </div>
-        <label class="field"><span>名前(表示に使います)</span><input type="text" name="name" value="${esc(cfg.name)}" placeholder="${loginRole === 'patient' ? '例: はなこ' : '例: たろう'}"></label>
+        <label class="field"><span>名前(表示に使います)</span><input type="text" name="name" value="${esc(cfg.name || lookName(loginRole))}" placeholder="${esc(loginNamePh(loginRole))}"></label>
         <div id="login-error" class="error"></div>
         <button type="submit" class="btn primary big" style="margin-top:8px">はじめる</button>
       </form>
@@ -540,7 +563,7 @@
     };
     const meds = medRows(s).map(([f, title, states]) => {
       const m = parseMed(o[f], f === 'med_morning');
-      return `<div class="obs-field"><div class="obs-label">${title}</div><div class="chips">${states.map(([k, l]) => medBtn(f, k, l, title, m)).join('')}</div></div>`;
+      return `<div class="obs-field"><div class="obs-label">${title}</div><div class="chips">${states.map(([k, l]) => medBtn(f, k, l, title, m)).join('')}</div>${f === 'med_night' ? earlyBox(o) : ''}</div>`;
     }).join('');
     const times = prnList(o);
     const prn = `<div class="obs-field"><div class="obs-label">頓服(必要な時の薬)</div><div class="chips">
@@ -550,7 +573,7 @@
     const medHelp = `<p class="help">${isToday ? '押すと今の時刻で記録します。<b>長押し</b>すると時刻を入れられます。' : '前の日の分は、押すと時刻を入れる欄が開きます。'}もう一度押すと取り消せます。${s.med2_label ? '' : '<br>「設定」タブの「朝の薬で分けて書く薬の名前」を入れると、ボタンにその名前が出ます。'}</p>`;
     const snack = `<button class="chip-btn snack ${o.night_snack === 1 ? 'sel' : ''}" data-act="obs" data-f="night_snack" data-v="1" aria-pressed="${o.night_snack === 1}">寝る前の間食</button>`;
     const cards = {
-      sleep: () => sleepCard(data.health, s),
+      sleep: () => sleepCard(data.health, s, data.early_prev),
       morning: () => card('朝のようす', wake + scaleField('getup', o) + noteField(o, 'note_morning', '例: 起きてすぐふらついた')),
       day: () => card('日中のようす', scaleField('gait', o) + scaleField('lying', o) + scaleField('outing', o) +
         `<div class="obs-field"><div class="obs-label">仕事・習い事</div>${setChips('activity', ACTIVITY, o.activity)}</div>` +
@@ -588,16 +611,40 @@
     const rows = SERIES_DEFS.map(([k, l]) => { const sr = seriesOf(h, k); return sr.length ? `<div><b>${l}</b>${sr.map((p) => `<span>${esc(p[0])} ${esc(String(p[1]))}</span>`).join('')}</div>` : ''; }).join('');
     return rows ? `<details class="series"><summary>時刻ごとの値</summary>${rows}</details>` : '';
   }
-  function sleepCard(h, s) {
+  // 寝る前の薬が 18 時より前の時: 合っているかをたずねる。合っていれば「早く休んだ日」と出す
+  function earlyBox(o) {
+    if (!isEarlyNight(o.med_night)) return '';
+    const t = parseMed(o.med_night).t;
+    if (o.early_bed === 1) return `<p class="early-note">🌙 <b>早く休んだ日</b>(寝る前の薬 ${t})。夕方からの眠りは、次の日の「昨夜の眠り」に1晩として入ります。</p>`;
+    return `<div class="early-ask"><p>寝る前の薬が <b>${t}</b> になっています(18時より前)。この時刻で合っていますか？</p>
+      <div class="chips"><button class="chip-btn" data-act="early-ok">合っている(早く休んだ)</button><button class="chip-btn" data-act="early-fix">時刻を直す</button></div></div>`;
+  }
+  // 早い時刻の寝る前の薬を記録した直後にたずねる(「あとで」を押しても、おくすりの欄に同じ質問が残る)
+  // たずねた時は true(そのシートに時刻が出るので、「記録しました」の知らせは出さない。ボタンに重なるため)
+  function askEarly(f) {
+    const o = obsNow();
+    if (f !== 'med_night' || !isEarlyNight(o.med_night) || o.early_bed === 1) return false;
+    sheet = { type: 'early', time: parseMed(o.med_night).t };
+    renderOverlay();
+    return true;
+  }
+  function earlySheetHTML() {
+    return wrapSheet(`<h3>寝る前の薬 ${esc(sheet.time)}</h3>
+      <p>18時より前の時刻です。この時刻で合っていますか？</p>
+      <p class="help">合っていれば、この日を「早く休んだ日」として記録します。夕方からの眠りは、次の日の「昨夜の眠り」に1晩として入ります。</p>
+      <div class="actions"><button class="btn primary" data-act="early-ok">合っている(早く休んだ)</button><button class="btn outline" data-act="early-fix">時刻を直す</button><button class="btn ghost" data-act="sheet-close">あとで</button></div>`);
+  }
+  const earlyPrevNote = (t) => (t ? `<p class="early-note">🌙 前の日は早く休みました(寝る前の薬 ${esc(t)})。夕方からの眠りも、この日の分として数えます。</p>` : '');
+  function sleepCard(h, s, earlyPrev) {
     const hl = healthLink(s);
     if (!h || (h.sleep_min == null && h.steps == null && h.inbed_min == null && !SERIES_DEFS.some(([k]) => h[k] != null && h[k] !== ''))) {
       const last = s.health_last_at ? `最後に届いたのは ${fmtStamp(s.health_last_at, true)} です。` : '';
       const why = hl.consent ? last || '本人の iPhone の設定がすむと、毎日自動で届きます。'
         : '本人の同意と iPhone の設定がすむと、毎日自動で届きます(設定タブ)。';
-      return card('昨夜の眠り <span class="link">自動</span>', `<p class="muted small">まだ届いていません。${esc(why)}</p>`);
+      return card('昨夜の眠り <span class="link">自動</span>', `${earlyPrevNote(earlyPrev)}<p class="muted small">まだ届いていません。${esc(why)}</p>`);
     }
     const sl = h.sleep_min != null ? `${Math.floor(h.sleep_min / 60)}<small>時間</small>${pad(h.sleep_min % 60)}<small>分</small>` : '<span class="muted">—</span>';
-    return card('昨夜の眠り <span class="link">自動</span>', `<div class="sleep-main">${sl}${h.awakenings != null ? `<small>目覚め ${h.awakenings}回</small>` : ''}</div>
+    return card('昨夜の眠り <span class="link">自動</span>', `${earlyPrevNote(earlyPrev)}<div class="sleep-main">${sl}${h.awakenings != null ? `<small>目覚め ${h.awakenings}回</small>` : ''}</div>
       <dl class="kv">
         ${h.bed_start ? `<dt>寝た→起きた</dt><dd>${esc(h.bed_start)} → ${esc(h.bed_end || '')}</dd>` : ''}
         ${h.deep_min != null && h.deep_min > 0 ? `<dt>深い眠り</dt><dd>${h.deep_min}分</dd>` : ''}
@@ -647,6 +694,7 @@
     easy: [['楽な時間', (o) => setAbbr(o.easy_times, [['morning', '朝'], ['noon', '昼'], ['evening', '夕'], ['night', '夜']])],
       ['できたこと', (o) => (o.good_note ? '✎' : '')]],
     meds: [['朝の薬', (o) => MED_SYM[parseMed(o.med_morning, true).st] || '', 1], ['寝る前の薬', (o) => MED_SYM[parseMed(o.med_night).st] || '', 1],
+      ['早く休んだ', (o) => (o.early_bed === 1 ? '●' : ''), 0, 1],
       ['頓服', (o) => { const n = prnList(o).length || o.prn || 0; return n ? n + '回' : ''; }]],
     alcohol: [['アルコール', (o) => sym(['無', '有'], o.alcohol), 1]],
     memo: [['メモ', (o, h, n) => (n ? n + '件' : '')]]
@@ -703,7 +751,7 @@
       <li>仕事など: 出 会社出勤 残 出勤+残業 習 習い事 バ バレエ</li>
       <li>食事: 多 よく食べた 普 ふつう 半 半分くらい 少 少し × ほぼ食べず / 間食: ● 寝る前の間食</li>
       <li>見た目: 不随意運動 1〜5 / ことば: 痛 痛み ぐ ぐるぐる 他 その他</li>
-      <li>楽な時間: 朝 昼 夕 夜 / 薬: ● 全部・飲んだ ◐ ${esc(medName(s))}以外 ◔ 一部 ○ 飲まなかった</li>
+      <li>楽な時間: 朝 昼 夕 夜 / 薬: ● 全部・飲んだ ◐ ${esc(medName(s))}以外 ◔ 一部 ○ 飲まなかった / 早く休んだ: ● 寝る前の薬が18時より前で「合っている」を押した日(その夜の眠りは次の日の列)</li>
       <li>歩く速さ km/時 / 歩幅 cm / 左右差(歩行非対称性)・両足支持(両足で支えている時間)・歩行安定性 % / 安静時心拍 回/分 / 心拍変動 ms(歩き方は iPhone をポケットに入れて歩いた日だけ)</li></ul></details>`;
     const notes = days.slice().reverse().map((d) => {
       const o = obsBy[d] || {};
@@ -761,6 +809,7 @@
     const codes = {};
     Object.keys(SCALES).forEach((k) => { codes[k] = { label: SCALES[k].label, values: Object.fromEntries(SCALES[k].opts.map(([v, l]) => [v, l])) }; });
     codes.night_snack = { label: '寝る前の間食', values: { 1: 'あり' } };
+    codes.early_bed = { label: '早く休んだ日(寝る前の薬が18時より前で、記録した人が「合っている」と確かめた日)。夕方からの眠りは次の日の health に1晩として入る', values: { 1: 'はい' } };
     codes.activity = { label: '仕事・習い事(カンマ区切り)', values: Object.fromEntries(ACTIVITY) };
     codes.easy_times = { label: '楽そうだった時間帯', values: Object.fromEntries(EASY) };
     codes.complaint = { label: '本人が自分から口にしたこと(こちらからはたずねていない)', values: Object.fromEntries(COMPLAINT) };
@@ -801,6 +850,7 @@
       ['楽そうだった時間帯', (d, o) => setNames(o.easy_times, EASY)],
       ['朝の薬', (d, o) => medState[parseMed(o.med_morning, true).st] || ''], ['朝の薬の時刻', (d, o) => parseMed(o.med_morning, true).t],
       ['寝る前の薬', (d, o) => medState[parseMed(o.med_night).st] || ''], ['寝る前の薬の時刻', (d, o) => parseMed(o.med_night).t],
+      ['早く休んだ', (d, o) => (o.early_bed === 1 ? 'はい' : '')],
       ['頓服の時刻', (d, o) => prnList(o).join(' ')], ['アルコール', (d, o) => name('alcohol', o.alcohol)],
       ['睡眠(分)', (d, o, h) => h.sleep_min], ['目覚め(回)', (d, o, h) => h.awakenings], ['深い眠り(分)', (d, o, h) => h.deep_min], ['昼寝など(分)', (d, o, h) => h.nap_min],
       ['寝た時刻', (d, o, h) => h.bed_start], ['起きた時刻(眠り)', (d, o, h) => h.bed_end], ['歩数', (d, o, h) => h.steps],
@@ -892,10 +942,11 @@
       card('場面ごとのくま', `<p class="small muted" style="margin-bottom:8px">タップして、その場面に出す画像を選びます。</p><div class="img-grid">${slotCells}</div>`) +
       card('ひとことの種類', `<p class="small muted" style="margin-bottom:8px">タップして、ことばや絵を変えられます。</p><div class="img-grid">${reactCells}</div>`) +
       card(`登録した画像 <span class="link">${imgs.length}枚</span>`, `${imgCells ? `<div class="img-grid" style="margin-bottom:12px">${imgCells}</div>` : '<p class="muted small" style="margin-bottom:10px">まだありません。</p>'}
-        ${uploadButton('lib', '＋ 画像を登録する')}
-        <p class="help">iPhone の写真やファイルから選べます。小さく縮めて、家族のスプレッドシートに保存します(GitHub には上がらないので、外からは見えません)。正方形で背景が透明の PNG だと、きれいに出ます。</p>`);
+        ${uploadButton('lib', '＋ 画像を登録する', true)}
+        <p class="help">iPhone の写真やファイルから選べます。何枚かまとめて選ぶと、1枚ずつ順番に登録します(1枚に数秒かかります)。小さく縮めて、家族のスプレッドシートに保存します(GitHub には上がらないので、外からは見えません)。正方形で背景が透明の PNG だと、きれいに出ます。</p>`);
   }
-  const uploadButton = (target, label) => `<label class="btn outline upload-btn">${label}<input type="file" accept="image/*" data-upload="${esc(target)}"></label>`;
+  // multi: 何枚でも一度に選べる(「登録した画像」だけ。場面やひとことに使う時は1枚)
+  const uploadButton = (target, label, multi) => `<label class="btn outline upload-btn">${label}<input type="file" accept="image/*"${multi ? ' multiple' : ''} data-upload="${esc(target)}"></label>`;
 
   /* ---- 設定 ---- */
   function viewSettings(data) {
@@ -904,8 +955,8 @@
     return `<form id="settings-form" class="card">
       <h2>設定</h2>
       ${f('app_title', 'アプリのタイトル', 'text', 'この画面(記録する人)のいちばん上に出ます。本人の画面には出ません。空欄なら「くまの記録」', '例: くまの記録')}
-      ${f('patient_name', '本人の名前', 'text', 'レポートに印字します(空欄でも可)')}
-      ${f('supporter_name', '記録する人の名前', 'text', '本人の同意の画面に「届く先: ○○さん」と出ます')}
+      ${f('patient_name', '本人の名前', 'text', 'レポートに印字します(空欄でも可)。ログイン画面の本人のボタンにも出ます')}
+      ${f('supporter_name', '記録する人の名前', 'text', '本人の同意の画面に「届く先: ○○さん」と出ます。ログイン画面の記録する人のボタンにも出ます')}
       ${f('start_date', '記録の開始日', 'date', 'この日より前は、記録・一覧・レポートに出ません')}
       ${f('med2_label', '朝の薬で分けて書く薬の名前', 'text', '朝の薬のボタン(「○○全部飲んだ」「○○一部飲んだ」「○○以外飲んだ」)の○○に出ます。名前はスプレッドシートにだけ保存され、GitHub には出ません', '例: お薬の名前')}
       <div class="row"><div style="flex:1">${f('last_appointment', '前回の診察日', 'date')}</div><div style="flex:1">${f('next_appointment', '次の診察日', 'date')}</div></div>
@@ -1127,7 +1178,7 @@
       if (replace) { const i = list.indexOf(replace); if (i >= 0) list.splice(i, 1); }
       list.push(t); savePrn(list);
     } else saveObs({ [f]: `${v} ${t}` });
-    toast(`${label} ${t} で記録しました`);
+    if (!askEarly(f)) toast(`${label} ${t} で記録しました`);
   }
   function savePrn(list) {
     list.sort((a, b) => hmKey(a) - hmKey(b));
@@ -1137,7 +1188,7 @@
   function renderOverlay() {
     const el = document.getElementById('overlay');
     if (!sheet) { el.innerHTML = ''; return; }
-    const map = { memo: memoSheetHTML, key: keySheetHTML, psettings: patientSettingsHTML, health: healthSheetHTML, slot: slotSheetHTML, react: reactSheetHTML, image: imageSheetHTML, medtime: medTimeSheetHTML, cal: calSheetHTML };
+    const map = { memo: memoSheetHTML, key: keySheetHTML, psettings: patientSettingsHTML, health: healthSheetHTML, slot: slotSheetHTML, react: reactSheetHTML, image: imageSheetHTML, medtime: medTimeSheetHTML, cal: calSheetHTML, early: earlySheetHTML };
     el.innerHTML = map[sheet.type] ? map[sheet.type]() : '';
     if (sheet && sheet.type === 'memo') { const ta = el.querySelector('textarea'); if (ta && !sheet.focused) { sheet.focused = true; setTimeout(() => ta.focus(), 50); } }
   }
@@ -1146,6 +1197,8 @@
   const obsNow = () => (cache && cache.obs) || {};
   function saveObs(patch) {
     const date = curDate;
+    // 寝る前の薬を夕方より後に直した・取り消した時は「早く休んだ日」も外す(サーバーも同じように外す)
+    if ('med_night' in patch && !isEarlyNight(patch.med_night) && obsNow().early_bed === 1) patch.early_bed = null;
     enqueue(Object.assign({ action: 'saveObs', date }, patch), (c) => { if (c.date === date) c.obs = Object.assign({ date }, c.obs || {}, patch); });
   }
   function memoSave() {
@@ -1267,29 +1320,58 @@
       throw new Error('big');
     } finally { URL.revokeObjectURL(url); }
   }
-  async function uploadImage(file, target) {
-    if (uploading) return;
+  // 1枚を縮めて送る。登録できたら 'u:<id>' を返す。できなければ、理由の文を持った Error を投げる
+  async function uploadOne(file) {
+    let img;
+    try { img = await shrinkImage(file); } catch (e) {
+      throw new Error(e.message === 'big' ? '画像が大きすぎます' : 'この画像は読めませんでした');
+    }
+    const name = String(file.name || '画像').replace(/\.[^.]+$/, '').slice(0, 30) || '画像';
+    let data;
+    try { data = await call({ action: 'uploadImage', name, data: img.data, w: img.w, h: img.h }); } catch (e) {
+      throw Object.assign(new Error('通信できませんでした。もう一度お試しください'), { stop: true });
+    }
+    if (!data.ok) throw Object.assign(new Error(data.message || '登録できませんでした'), { stop: data.error === 'too_many' || data.error === 'auth' });
+    const meta = data.image;
+    const blob = dataUrlToBlob(img.data);
+    await cachePut(meta.id, blob);
+    up.url[meta.id] = URL.createObjectURL(blob);
+    if (cache) { cache.images = (cache.images || []).concat([meta]); save(KEYS.state, cache); }
+    return 'u:' + meta.id;
+  }
+  // 画像を登録する。「登録した画像」からは何枚でも一度に選べるので、1枚ずつ順番に送る
+  async function uploadImages(files, target) {
+    if (!files.length) return;
+    if (uploading) { toast('いま画像を送っています。終わるまでお待ちください'); return; }
     uploading = true;
-    toast('画像を縮めて送っています…');
+    const n = files.length;
+    let done = 0, ref = '', rest = 0;
+    const fails = [];
     try {
-      const img = await shrinkImage(file);
-      const name = String(file.name || '画像').replace(/\.[^.]+$/, '').slice(0, 30) || '画像';
-      const data = await call({ action: 'uploadImage', name, data: img.data, w: img.w, h: img.h });
-      if (!data.ok) { toast(data.message || '登録できませんでした'); return; }
-      const meta = data.image;
-      const blob = dataUrlToBlob(img.data);
-      await cachePut(meta.id, blob);
-      up.url[meta.id] = URL.createObjectURL(blob);
-      if (cache) { cache.images = (cache.images || []).concat([meta]); save(KEYS.state, cache); }
-      const ref = 'u:' + meta.id;
-      if (target.startsWith('slot:')) { setSlot(target.slice(5), ref); sheet = null; renderOverlay(); }
-      else if (target === 'react' && sheet && sheet.type === 'react') { sheet.draft = ref; sheet.emoji = ''; renderOverlay(); }
-      toast('画像を登録しました');
-      render();
-    } catch (e) {
-      toast(e.message === 'decode' ? 'この画像は読めませんでした' : e.message === 'big' ? '画像が大きすぎます' : '通信できませんでした。もう一度お試しください');
+      for (let i = 0; i < n; i++) {
+        toast(n > 1 ? `画像を縮めて送っています… ${i + 1} / ${n}枚` : '画像を縮めて送っています…');
+        try {
+          ref = await uploadOne(files[i]);
+          done++;
+          render();
+        } catch (e) {
+          fails.push(e.message);
+          if (e.stop) { rest = n - i - 1; break; }
+        }
+      }
     } finally {
       uploading = false;
+    }
+    if (done && n === 1) {
+      if (target.startsWith('slot:')) { setSlot(target.slice(5), ref); sheet = null; renderOverlay(); }
+      else if (target === 'react' && sheet && sheet.type === 'react') { sheet.draft = ref; sheet.emoji = ''; renderOverlay(); }
+    }
+    if (!fails.length) toast(n > 1 ? `${done}枚の画像を登録しました` : '画像を登録しました');
+    else if (n === 1) toast(fails[0]);
+    else {
+      const why = fails.filter((m, i) => fails.indexOf(m) === i).join(' / ');
+      const ng = fails.length + rest;
+      toast(`${done}枚を登録しました。${ng}枚は登録できませんでした(${why})`, { label: 'OK', onClick: () => {} });
     }
   }
 
@@ -1313,6 +1395,7 @@
     const root = document.getElementById('app');
     document.title = cfg.token && cfg.role === 'supporter' ? appTitle() : 'くま'; // ブラウザのタブの名前
     if (!cfg.token) { root.innerHTML = viewLogin(); renderOverlay(); return; }
+    if (cache && cache.settings) rememberLook();
     let data = null;
     if (cfg.role === 'supporter') data = cache && cache.date === curDate && 'obs' in cache ? cache : null;
     else data = cache && cache.room ? cache : null;
@@ -1357,7 +1440,13 @@
         loginRole = el.dataset.role;
         el.parentNode.querySelectorAll('.btn').forEach((b) => b.classList.toggle('sel', b === el));
         const nm = document.querySelector('#login-form input[name=name]');
-        if (nm) nm.placeholder = loginRole === 'patient' ? '例: はなこ' : '例: たろう';
+        if (nm) {
+          nm.placeholder = loginNamePh(loginRole);
+          // 名前が空か、もう一方の人の名前のままなら、選んだ人の名前に入れ替える
+          const other = lookName(loginRole === 'patient' ? 'supporter' : 'patient');
+          const v = nm.value.trim();
+          if (lookName(loginRole) && (!v || v === other || v === String(cfg.name || '').trim())) nm.value = lookName(loginRole);
+        }
         break;
       }
       case 'obs': {
@@ -1384,7 +1473,14 @@
         if (curDate !== logicalToday()) { openMedTime(f, v, label); break; } // 前の日は時刻を入れてもらう
         const t = nowHm();
         saveObs({ [f]: `${v} ${t}` });
-        toast(`${label} ${t} で記録しました`, { label: '時刻を変える', onClick: () => openMedTime(f, v, label) });
+        if (!askEarly(f)) toast(`${label} ${t} で記録しました`, { label: '時刻を変える', onClick: () => openMedTime(f, v, label) });
+        break;
+      }
+      case 'early-ok': saveObs({ early_bed: 1 }); sheet = null; renderOverlay(); toast('早く休んだ日として記録しました'); break;
+      case 'early-fix': {
+        const m = parseMed(obsNow().med_night); const st = m.st === 'part' ? 'part' : 'yes';
+        sheet = null;
+        openMedTime('med_night', st, `寝る前の薬: ${st === 'part' ? '一部' : '飲んだ'}`);
         break;
       }
       case 'prn-add': {
@@ -1496,14 +1592,20 @@
     }
   });
 
+  // 画像を選んだ時。写真を選んでいる間に画面が描き直されても(選ぶ欄が入れ替わっても)届くように、
+  // 選ぶ欄を押した時に、その欄そのものに受け取り役を付けておく
+  function onFilesPicked(t) {
+    const files = Array.from(t.files || []); const target = t.dataset.upload; t.value = '';
+    uploadImages(files, target);
+  }
+  document.addEventListener('click', (e) => {
+    const t = e.target;
+    if (t && t.matches && t.matches('input[type=file][data-upload]')) t.onchange = (ev) => { ev.stopPropagation(); onFilesPicked(t); };
+  }, true);
   // 入力欄: 観察の文字と時刻は、入力し終わった時(欄から離れた時)に保存する
   document.addEventListener('change', (e) => {
     const t = e.target;
-    if (t.matches && t.matches('input[type=file][data-upload]')) {
-      const file = t.files && t.files[0]; const target = t.dataset.upload; t.value = '';
-      if (file) uploadImage(file, target);
-      return;
-    }
+    if (t.matches && t.matches('input[type=file][data-upload]')) { onFilesPicked(t); return; }
     if (t.dataset && t.dataset.export) { exportRange = Object.assign({}, exportRange, { [t.dataset.export]: t.value }); return; }
     if (t.dataset && t.dataset.obs) { saveObs({ [t.dataset.obs]: t.value.trim() }); return; }
     if (t.dataset && t.dataset.setting) {

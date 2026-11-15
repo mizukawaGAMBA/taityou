@@ -11,3 +11,5 @@ dev/
 .clasprc.json
 # VS Code などの設定
 .vscode/
+# 書き出した健康データ(分析用)。公開リポジトリには絶対に上げない
+kuma-data*

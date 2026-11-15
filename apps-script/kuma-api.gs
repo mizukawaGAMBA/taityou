@@ -273,7 +273,7 @@ function toCell(v) {
  * 日付は「論理日」(午前4時区切り)の "YYYY-MM-DD" 文字列。時刻は "HH:MM"。
  * ===================================================================== */
 var Core = (function () {
-  var VERSION = 9;
+  var VERSION = 10;
   var IMAGE_PARTS = 10;       // 1 枚の画像を最大 10 個のセルに分けて入れる
   var IMAGE_CHUNK = 40000;    // 1 セルに入れる文字数(セルの上限は 50,000 文字)
   var IMAGE_META_COLS = 7;    // 画像の表の、データ以外の列の数
@@ -289,7 +289,9 @@ var Core = (function () {
                    // v4 で右に足した列(カテゴリーごとの備考、寝る前の間食、頓服の時刻)
                    'note_morning', 'note_day', 'note_meds', 'note_alcohol', 'night_snack', 'prn_times',
                    // v5: 仕事・習い事(会社出勤、残業、習い事、バレエ)
-                   'activity'],
+                   'activity',
+                   // v12: 早く休んだ日(寝る前の薬が 18 時より前で、記録する人が「合っている」と確かめた日 = 1)
+                   'early_bed'],
     // iPhone / Apple Watch から自動で届く値(1 日 1 行)。列は右に足していく(前の版のシートとそろえるため)
     health_daily: ['date', 'sleep_min', 'inbed_min', 'awakenings', 'deep_min', 'rem_min', 'bed_start', 'bed_end',
                    'steps', 'steadiness', 'resting_hr', 'hrv', 'move_score', 'source', 'updated_at', 'nap_min', 'walking_speed',
@@ -325,11 +327,11 @@ var Core = (function () {
   // saveSettings では変えられない設定(それぞれ専用の操作でだけ変わる)
   var PROTECTED_SETTINGS = { health_consent: 1, health_consent_at: 1, health_consent_by: 1, health_last_at: 1, health_last: 1,
     health_try_at: 1, health_try: 1, image_config: 1 };
-  // 本人の端末に渡す設定(記録の中身や、先生へのメモは渡さない)
-  var PATIENT_SETTINGS = ['supporter_name', 'health_shortcut_url', 'health_shortcut_name', 'health_consent', 'health_consent_at', 'health_last_at', 'image_config'];
+  // 本人の端末に渡す設定(記録の中身や、先生へのメモは渡さない)。本人の名前は、本人の端末のログイン画面のボタンに使う
+  var PATIENT_SETTINGS = ['patient_name', 'supporter_name','health_shortcut_url', 'health_shortcut_name', 'health_consent', 'health_consent_at', 'health_last_at', 'image_config'];
 
   // 観察の項目。数字の範囲は [最小, 最大]
-  var OBS_SCALES = { getup: [0, 2], gait: [0, 2], lying: [0, 3], outing: [0, 2], meal: [0, 4], movement: [1, 5], alcohol: [0, 1], night_snack: [0, 1] };
+  var OBS_SCALES = { getup: [0, 2], gait: [0, 2], lying: [0, 3], outing: [0, 2], meal: [0, 4], movement: [1, 5], alcohol: [0, 1], night_snack: [0, 1], early_bed: [0, 1] };
   var OBS_SETS = { easy_times: ['morning', 'noon', 'evening', 'night'], complaint: ['pain', 'dizzy', 'other'],
     activity: ['work', 'overtime', 'lesson', 'ballet'] };
   // 備考: good_note = 楽そうだった時間・できたこと、complaint_note = 見た目と本人のことば、ほかはカテゴリーの名前どおり
@@ -339,6 +341,8 @@ var Core = (function () {
   // 時刻は "all 08:10" のように後ろに付ける(v3 の朝の "yes" も読めるように残す)
   var MED_RE = /^(?:(?:yes|all|part|noc)(?: (?:[01]\d|2[0-3]):[0-5]\d)?|no)$/;
   var PRN_TIMES_RE = /^(?:(?:[01]\d|2[0-3]):[0-5]\d)(?:,(?:[01]\d|2[0-3]):[0-5]\d){0,19}$/;
+  // 寝る前の薬が「早い」時刻(朝 4 時〜夕方 17 時台)。深夜 0〜3 時台は前の日の夜の続きなので含めない
+  var EARLY_NIGHT_RE = /^(?:yes|part) (?:0[4-9]|1[0-7]):[0-5]\d$/;
   var SLOT_KEYS = ['title', 'loading', 'normal', 'sleepy', 'love', 'happy', 'role_patient', 'role_supporter'];
   var HEALTH_SCALARS = ['steadiness', 'resting_hr', 'hrv', 'move_score', 'walking_speed', 'walk_asym', 'double_support', 'step_length'];
   var HEALTH_TEXT = { steadiness: 1 };
@@ -554,7 +558,31 @@ var Core = (function () {
     sessions.forEach(function (s) { if (spanMin(s) > spanMin(best)) best = s; });
     return best;
   }
-  // 1 晩分(前日 18 時〜当日 18 時に始まった記録)の眠りをまとめる。いちばん長い眠りを「夜の眠り」、残りを昼寝などとする
+  // 眠りの記録を「どの日の朝の眠りか」に分ける。ひと続きの眠り(2 時間より長く空いたら別)ごとに、
+  // 目が覚めた時刻で日を決める(18 時より前に目が覚めたらその日、18 時より後ならあくる日の分)。
+  // 体調が悪くて夕方から朝まで眠った日も、18 時で切れずに 1 晩として数える
+  function nightsOf(samples) {
+    function dayOf(ms) { return ymdOf(ms + 6 * 3600000); }
+    var asleep = samples.filter(function (s) { return s.cat === 'core' || s.cat === 'deep' || s.cat === 'rem'; });
+    var sessions = splitSessions(union(asleep.map(function (s) { return [s.start, s.end]; }))).map(function (ss) {
+      var end = ss[ss.length - 1][1];
+      return { start: ss[0][0], end: end, day: dayOf(end) };
+    });
+    var nights = {};
+    samples.forEach(function (s) {
+      // いちばん重なる眠りの日に入れる(ベッド内・覚醒の記録は、2 時間以内の近い眠りに)。近くに眠りがなければ、終わった時刻で決める
+      var best = null, score = -2 * 3600000;
+      sessions.forEach(function (ss) {
+        var ov = Math.min(s.end, ss.end) - Math.max(s.start, ss.start); // 重なった長さ(離れていればマイナス = 離れた長さ)
+        if (ov >= score && (!best || ov > score)) { best = ss; score = ov; }
+      });
+      var d = best ? best.day : dayOf(s.end);
+      if (!nights[d]) nights[d] = [];
+      nights[d].push(s);
+    });
+    return nights;
+  }
+  // 1 晩分の眠りをまとめる。いちばん長い眠りを「夜の眠り」、残りを昼寝などとする
   function summarizeNight(samples) {
     function pick(cats) {
       return union(samples.filter(function (s) { return cats.indexOf(s.cat) >= 0; }).map(function (s) { return [s.start, s.end]; }));
@@ -789,8 +817,11 @@ var Core = (function () {
     if (since > date) since = date;
     var recorded = all.filter(function (r) { return r.date >= since && r.date <= date && hasObs(r); }).length;
     var sent = store.all('reaction').map(normReaction).sort(function (a, b) { return a.created_at < b.created_at ? 1 : -1; }).slice(0, 5);
+    // 前の日が「早く休んだ日」なら、その夜の眠り(この日の「昨夜の眠り」)に添えるため、寝る前の薬の時刻を渡す
+    var prev = findOne(all, 'date', addDays(date, -1));
+    var earlyPrev = prev && prev.early_bed === 1 && EARLY_NIGHT_RE.test(prev.med_night) ? prev.med_night.split(' ')[1] : '';
     return {
-      ok: true, date: date,
+      ok: true, date: date, early_prev: earlyPrev,
       obs: findOne(all, 'date', date),
       health: findOne(healthBetween(store, date, date), 'date', date),
       memos: memosBetween(store, date, date),
@@ -844,6 +875,8 @@ var Core = (function () {
       set(sk, OBS_SETS[sk].filter(function (a) { return vals.indexOf(a) >= 0; }).join(',')); // 決まった順に並べる
     }
     for (var tk in OBS_TEXTS) if (tk in req) set(tk, toStr(req[tk]).trim().slice(0, OBS_TEXTS[tk]));
+    // 「早く休んだ日」は、寝る前の薬が早い時刻の時だけ。時刻を直したり取り消したりしたら外す
+    if (row.early_bed !== null && !EARLY_NIGHT_RE.test(row.med_night)) set('early_bed', null);
     if (!changed) return { ok: true, obs: row };
     row.recorded_by = device.name;
     row.updated_at = env.now();
@@ -879,12 +912,7 @@ var Core = (function () {
     var sd = startDate(getSettings(store));
     function inRange(d) { return d >= oldest && d <= today && (!sd || d >= sd); }
 
-    var nights = {};
-    sleepSamplesFrom(req).forEach(function (s) {
-      var d = ymdOf(s.start + 6 * 3600000); // 18 時を区切りに「どの日の朝の眠りか」を決める
-      if (!nights[d]) nights[d] = [];
-      nights[d].push(s);
-    });
+    var nights = nightsOf(sleepSamplesFrom(req));
     Object.keys(nights).forEach(function (d) {
       if (!inRange(d)) return; // 今まさに寝ている途中の夜(明日の分)は、明日の送信で入る
       var n = summarizeNight(nights[d]);
