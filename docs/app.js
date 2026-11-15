@@ -719,7 +719,100 @@
       ${notes ? `<section class="card"><h2>この7日の備考・メモ</h2>${notes}</section>` : ''}
       <section class="card"><h2>医師に見せるレポート</h2>
         <p class="small" style="margin-bottom:8px">PC のブラウザで開き、印刷 →「PDF に保存」。期間はレポート画面でも変えられます。</p>
-        <a class="btn primary" href="report.html?from=${from}&to=${listData.to}" target="_blank" rel="noopener">レポートを開く(${jpShort(from)}〜${jpShort(listData.to)})</a></section>`;
+        <a class="btn primary" href="report.html?from=${from}&to=${listData.to}" target="_blank" rel="noopener">レポートを開く(${jpShort(from)}〜${jpShort(listData.to)})</a></section>
+      ${exportCardHTML(s)}`;
+  }
+
+  /* ---- 分析用にデータを保存(期間を選んでファイルに書き出す) ----
+   * JSON = 分析用の一式(コードの意味つき、時刻ごとの値も入る)。CSV = Excel で見る日ごとの表 */
+  let exportRange = null; // { from, to }
+  function exportCardHTML(s) {
+    const today = logicalToday();
+    const sd = startDate(s) || addDays(today, -41);
+    if (!exportRange) exportRange = { from: sd, to: today };
+    return `<section class="card"><h2>分析用にデータを保存</h2>
+      <p class="small" style="margin-bottom:8px">選んだ期間の記録(観察・薬・メモ・眠り・歩数・歩き方と心拍の時刻ごとの値)をファイルに書き出します。パソコンで開いて押すと「ダウンロード」フォルダに入ります。</p>
+      <div class="row"><div style="flex:1"><label class="field"><span>開始日</span><input type="date" data-export="from" value="${esc(exportRange.from)}" min="${sd}" max="${today}"></label></div>
+        <div style="flex:1"><label class="field"><span>終了日</span><input type="date" data-export="to" value="${esc(exportRange.to)}" min="${sd}" max="${today}"></label></div></div>
+      <div class="btn-col"><button class="btn" data-act="export" data-fmt="json">データ一式を保存(分析用・JSON)</button>
+        <button class="btn outline" data-act="export" data-fmt="csv">日ごとの表を保存(Excel 用・CSV)</button></div>
+      <p class="help">健康の記録が入ったファイルです。家族の外には渡さないでください。</p></section>`;
+  }
+  async function exportData(fmt) {
+    const r = exportRange || {};
+    if (!r.from || !r.to || r.from > r.to) { toast('期間を選び直してください'); return; }
+    toast('書き出しています…');
+    let data;
+    try { data = await call({ action: 'report', from: r.from, to: r.to }); } catch (e) { toast('通信できませんでした'); return; }
+    if (!data.ok) { toast(data.message || '書き出せませんでした'); return; }
+    const name = `kuma-data_${data.from}_${data.to}`;
+    if (fmt === 'csv') downloadText(name + '.csv', '\ufeff' + exportCsv(data), 'text/csv;charset=utf-8'); // 先頭の印で Excel が文字化けしない
+    else downloadText(name + '.json', JSON.stringify(exportJson(data), null, 1), 'application/json');
+    toast(`保存しました(${jpShort(data.from)}〜${jpShort(data.to)})`);
+  }
+  function downloadText(filename, text, type) {
+    const url = URL.createObjectURL(new Blob([text], { type }));
+    const a = document.createElement('a');
+    a.href = url; a.download = filename; document.body.appendChild(a); a.click(); a.remove();
+    setTimeout(() => URL.revokeObjectURL(url), 5000);
+  }
+  // 数字のコードの意味(あとで読む人や分析のため、ファイルに一緒に入れる)
+  function exportCodes(s) {
+    const codes = {};
+    Object.keys(SCALES).forEach((k) => { codes[k] = { label: SCALES[k].label, values: Object.fromEntries(SCALES[k].opts.map(([v, l]) => [v, l])) }; });
+    codes.night_snack = { label: '寝る前の間食', values: { 1: 'あり' } };
+    codes.activity = { label: '仕事・習い事(カンマ区切り)', values: Object.fromEntries(ACTIVITY) };
+    codes.easy_times = { label: '楽そうだった時間帯', values: Object.fromEntries(EASY) };
+    codes.complaint = { label: '本人が自分から口にしたこと(こちらからはたずねていない)', values: Object.fromEntries(COMPLAINT) };
+    medRows(s).forEach(([f, label, states]) => { codes[f] = { label: label + '(「状態 時刻」)', values: Object.fromEntries(states.concat([['no', '飲まなかった']])) }; });
+    codes.prn_times = { label: '頓服を飲んだ時刻(カンマ区切り)' };
+    codes.health = {
+      sleep_min: '眠った時間(分)', awakenings: '5分以上目が覚めた回数', deep_min: '深い眠り(分)', rem_min: 'レム睡眠(分)', inbed_min: 'ベッドにいた時間(分)',
+      nap_min: '昼寝など(分)', bed_start: '寝た時刻', bed_end: '起きた時刻', steps: '歩数', walking_speed: '歩く速さ(km/時)', step_length: '歩幅(cm)',
+      walk_asym: '歩行非対称性(%)', double_support: '両足支持時間(%)', steadiness: '歩行安定性(%)', resting_hr: '安静時心拍数(回/分)', hrv: '心拍変動(ms)',
+      metric_series: '1日の中の時刻ごとの値 { 項目: [[時刻, 値], ...] }(単位は上と同じ)'
+    };
+    return codes;
+  }
+  function exportJson(data) {
+    const s = data.settings || {};
+    return {
+      format: 'kuma-export-1', exported_at: new Date().toISOString(), from: data.from, to: data.to,
+      settings: Object.fromEntries(['start_date', 'med2_label', 'last_appointment', 'next_appointment'].map((k) => [k, s[k] || ''])),
+      codes: exportCodes(s),
+      observe: data.obs, health: data.health, memos: (data.memos || []).map((m) => ({ date: m.date, ts: m.ts, text: m.text }))
+    };
+  }
+  function exportCsv(data) {
+    const s = data.settings || {};
+    const name = (k, v) => (v == null || !SCALES[k] ? '' : ((SCALES[k].opts.find(([x]) => x === v) || [])[1] || String(v)));
+    const setNames = (v, list) => list.filter(([k]) => String(v || '').split(',').includes(k)).map(([, l]) => l).join('・');
+    const medState = { all: `${medName(s)}全部`, part: '一部', noc: `${medName(s)}以外`, yes: '飲んだ', no: '飲まなかった' };
+    const obsBy = {}, hBy = {}, memoBy = {};
+    data.obs.forEach((o) => { obsBy[o.date] = o; });
+    data.health.forEach((h) => { hBy[h.date] = h; });
+    (data.memos || []).forEach((m) => { (memoBy[m.date] = memoBy[m.date] || []).push(`${hhmm(m.ts)} ${m.text}`); });
+    const cols = [
+      ['日付', (d) => d], ['曜日', (d) => DOW[dowOf(d)]],
+      ['起きてきた時刻', (d, o) => o.wake_time || ''], ['起き上がり', (d, o) => name('getup', o.getup)], ['ふらつき', (d, o) => name('gait', o.gait)],
+      ['横になっていた時間', (d, o) => name('lying', o.lying)], ['外出', (d, o) => name('outing', o.outing)], ['仕事・習い事', (d, o) => setNames(o.activity, ACTIVITY)],
+      ['食事の量', (d, o) => name('meal', o.meal)], ['寝る前の間食', (d, o) => (o.night_snack === 1 ? 'あり' : '')],
+      ['見た目(1-5)', (d, o) => (o.movement != null ? o.movement : '')], ['本人が口にしたこと', (d, o) => setNames(o.complaint, COMPLAINT)],
+      ['楽そうだった時間帯', (d, o) => setNames(o.easy_times, EASY)],
+      ['朝の薬', (d, o) => medState[parseMed(o.med_morning, true).st] || ''], ['朝の薬の時刻', (d, o) => parseMed(o.med_morning, true).t],
+      ['寝る前の薬', (d, o) => medState[parseMed(o.med_night).st] || ''], ['寝る前の薬の時刻', (d, o) => parseMed(o.med_night).t],
+      ['頓服の時刻', (d, o) => prnList(o).join(' ')], ['アルコール', (d, o) => name('alcohol', o.alcohol)],
+      ['睡眠(分)', (d, o, h) => h.sleep_min], ['目覚め(回)', (d, o, h) => h.awakenings], ['深い眠り(分)', (d, o, h) => h.deep_min], ['昼寝など(分)', (d, o, h) => h.nap_min],
+      ['寝た時刻', (d, o, h) => h.bed_start], ['起きた時刻(眠り)', (d, o, h) => h.bed_end], ['歩数', (d, o, h) => h.steps],
+      ['歩く速さ(km/時)', (d, o, h) => h.walking_speed], ['歩幅(cm)', (d, o, h) => h.step_length], ['歩行非対称性(%)', (d, o, h) => h.walk_asym],
+      ['両足支持時間(%)', (d, o, h) => h.double_support], ['歩行安定性(%)', (d, o, h) => h.steadiness], ['安静時心拍数', (d, o, h) => h.resting_hr], ['心拍変動(ms)', (d, o, h) => h.hrv],
+      ['備考(朝)', (d, o) => o.note_morning], ['備考(日中)', (d, o) => o.note_day], ['備考(見た目・ことば)', (d, o) => o.complaint_note],
+      ['できたこと', (d, o) => o.good_note], ['備考(薬)', (d, o) => o.note_meds], ['備考(アルコール)', (d, o) => o.note_alcohol], ['気になったこと(メモ)', (d) => (memoBy[d] || []).join(' / ')]
+    ];
+    const cell = (v) => { const t = v == null ? '' : String(v); return /[",\r\n]/.test(t) ? '"' + t.replace(/"/g, '""') + '"' : t; };
+    const lines = [cols.map(([h]) => cell(h)).join(',')];
+    for (let d = data.from; d <= data.to; d = addDays(d, 1)) lines.push(cols.map(([, f]) => cell(f(d, obsBy[d] || {}, hBy[d] || {}))).join(','));
+    return lines.join('\r\n') + '\r\n';
   }
   async function loadList(from) {
     if (listLoading) return;
@@ -1355,6 +1448,7 @@
       case 'tab': tab = el.dataset.tab; if (tab === 'list') { listData = null; listPage = 0; listFailed = false; } render(); break;
       case 'list-page': listPage = Math.max(0, listPage + parseInt(el.dataset.d, 10)); render(); break;
       case 'list-retry': listFailed = false; listData = null; render(); break;
+      case 'export': exportData(el.dataset.fmt); break;
       case 'cal-open': openCal(); break;
       case 'cal-month': {
         const [y, m] = sheet.month.split('-').map(Number);
@@ -1410,6 +1504,7 @@
       if (file) uploadImage(file, target);
       return;
     }
+    if (t.dataset && t.dataset.export) { exportRange = Object.assign({}, exportRange, { [t.dataset.export]: t.value }); return; }
     if (t.dataset && t.dataset.obs) { saveObs({ [t.dataset.obs]: t.value.trim() }); return; }
     if (t.dataset && t.dataset.setting) {
       const settings = { [t.dataset.setting]: t.value };
