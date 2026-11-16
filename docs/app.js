@@ -21,7 +21,7 @@
     const qp = new URLSearchParams(location.search);
     if (qp.get('api')) { cfg.apiUrl = qp.get('api').trim(); save(KEYS.cfg, cfg); history.replaceState(null, '', location.pathname); }
   } catch (e) { /* 無視 */ }
-  const QUEUE_ACTIONS = new Set(['saveObs', 'addMemo', 'deleteMemo', 'react', 'seenReactions', 'saveSettings', 'consentHealth', 'saveImageConfig', 'deleteImage']);
+  const QUEUE_ACTIONS = new Set(['saveObs', 'addMemo', 'updateMemo', 'deleteMemo', 'react', 'seenReactions', 'saveSettings', 'consentHealth', 'saveImageConfig', 'deleteImage']);
   let cache = load(KEYS.state, null);
   // 前の版の未送信(服薬ボタンなど)は今の仕組みでは送れないので捨てる
   let queue = load(KEYS.queue, []).filter((q) => q && q.req && QUEUE_ACTIONS.has(q.req.action));
@@ -30,7 +30,6 @@
   /* ========== 日付ユーティリティ ========== */
   const pad = (n) => String(n).padStart(2, '0');
   const fmtDate = (d) => `${d.getFullYear()}-${pad(d.getMonth() + 1)}-${pad(d.getDate())}`;
-  const fmtTime = (d) => `${fmtDate(d)}T${pad(d.getHours())}:${pad(d.getMinutes())}`;
   const nowHm = () => { const d = new Date(); return `${pad(d.getHours())}:${pad(d.getMinutes())}`; };
   // 論理日: 午前4時を日付の境目にする(深夜1時の出来事は「前日の夜」に属する)
   const logicalToday = (now = new Date()) => fmtDate(new Date(now.getTime() - 4 * 3600e3));
@@ -532,7 +531,13 @@
       `<button class="chip-btn ${cur === v ? 'sel' : ''}" data-act="obs" data-f="${key}" data-v="${v}" aria-pressed="${cur === v}">${l}</button>`).join('')}${extra || ''}</div></div>`;
   }
   // カテゴリーごとの備考欄(入力し終わって欄から離れた時に保存)
-  const noteField = (o, key, ph, label) => `<label class="note-field"><span>${label || '備考'}</span><textarea class="note" data-obs="${key}" maxlength="500" rows="1" placeholder="${esc(ph)}">${esc(o[key] || '')}</textarea></label>`;
+  // 備考欄。下に、ほかの日に書いた備考を 3 つまで出す(書き方をそろえるため)。押すと全文が見える
+  let noteExamples = {};
+  const noteField = (o, key, ph, label) => {
+    const ex = (noteExamples[key] || []).filter((x) => x && x.text);
+    return `<label class="note-field"><span>${label || '備考'}</span><textarea class="note" data-obs="${key}" maxlength="500" rows="1" placeholder="${esc(ph)}">${esc(o[key] || '')}</textarea></label>` +
+      (ex.length ? `<div class="note-ex" data-act="note-ex" role="button" aria-label="ほかの日の${esc(label || '備考')}(押すと全文)"><div class="h">ほかの日の${esc(label || '備考')}</div>${ex.map((x) => `<div class="i"><span class="d">${jpShort(x.date)}</span>${esc(x.text)}</div>`).join('')}</div>` : '');
+  };
   const fitNote = (t) => { t.style.height = 'auto'; t.style.height = (t.scrollHeight + 4) + 'px'; }; // 書いた分だけ欄を伸ばす
   function setChips(key, opts, cur) {
     const sel = new Set(String(cur || '').split(',').filter(Boolean));
@@ -550,6 +555,7 @@
     const o = data.obs || {};
     const s = data.settings || {};
     const pr = data.progress;
+    noteExamples = data.recent_notes || {};
     let progress = '';
     if (pr) {
       const left = s.next_appointment ? daysBetween(curDate, s.next_appointment) : null;
@@ -574,10 +580,10 @@
     const prn = `<div class="obs-field"><div class="obs-label">他の薬(頓服など)</div>
         <div class="row prn-row"><input type="text" id="prn-name" maxlength="30" value="${esc(prnDraft)}" placeholder="薬の名前(例: 痛み止め)" aria-label="他の薬の名前" enterkeyhint="done" autocomplete="off">
           <button class="chip-btn med" data-act="prn-add" data-lp="prn" data-label="他の薬を飲んだ">他の薬を飲んだ</button></div>
-        ${recent.length ? `<div class="chips prn-recent">${recent.map((n) => `<button class="chip-btn ${n === prnDraft ? 'sel' : ''}" data-act="prn-name" data-name="${esc(n)}" aria-pressed="${n === prnDraft}">${esc(n)}</button>`).join('')}</div>` : ''}
-        ${items.length || o.prn ? `<div class="chips prn-items">${items.map((p, i) => `<span class="pill"><button class="pill-t" data-act="prn-edit" data-i="${i}" aria-label="${p.t} ${esc(p.name)} の時刻と名前を直す">${p.t}${p.name ? ` ${esc(p.name)}` : ''}</button><button class="pill-x" data-act="prn-del" data-i="${i}" aria-label="${p.t} ${esc(p.name)} を取り消す">×</button></span>`).join('')}
+        ${prnChips(recent, prnDraft)}
+        ${items.length || o.prn ? `<div class="chips prn-items">${items.map((p, i) => `<span class="pill"><button class="pill-t" data-act="prn-edit" data-lp="prn-edit" data-i="${i}" aria-label="${p.t} ${esc(p.name)} の時刻と名前を直す">${p.t}${p.name ? ` ${esc(p.name)}` : ''}</button><button class="pill-x" data-act="prn-del" data-i="${i}" aria-label="${p.t} ${esc(p.name)} を取り消す">×</button></span>`).join('')}
           ${!items.length && o.prn ? `<span class="pill">${o.prn}回(時刻なし)</span>` : ''}</div>` : ''}
-        ${items.length ? '' : `<p class="help">名前を入れてから(下の名前を押しても入ります)「他の薬を飲んだ」を押すと、${isToday ? '今の時刻で記録します' : '時刻を入れる欄が開きます'}。名前は空でも記録できます。記録したあと、記録を押すと時刻と名前を直せます。</p>`}</div>`;
+        ${items.length ? '' : `<p class="help">名前を入れてから(下の名前を押しても入ります)「他の薬を飲んだ」を押すと、${isToday ? '今の時刻で記録します。<b>長押し</b>すると時刻を入れて記録できます' : '時刻を入れる欄が開きます'}。名前は空でも記録できます。記録したあとは、記録を押すか長押しすると、時刻と名前を直せます。名前の候補は × で消せます。</p>`}</div>`;
     const medHelp = `<p class="help">${isToday ? '押すと今の時刻で記録します。<b>長押し</b>すると時刻を入れられます。' : '前の日の分は、押すと時刻を入れる欄が開きます。'}もう一度押すと取り消せます。${s.med2_label ? '' : '<br>「設定」タブの「朝の薬で分けて書く薬の名前」を入れると、ボタンにその名前が出ます。'}</p>`;
     const snack = `<button class="chip-btn snack ${o.night_snack === 1 ? 'sel' : ''}" data-act="obs" data-f="night_snack" data-v="1" aria-pressed="${o.night_snack === 1}">寝る前の間食</button>`;
     const cards = {
@@ -663,9 +669,12 @@
   }
 
   function memoCard(data, date) {
-    const items = (data.memos || []).map((m) => `<li class="row"><span class="muted small">${hhmm(m.ts)}</span><span class="spacer">${esc(m.text)}</span><button class="icon-btn" data-act="memo-del" data-id="${esc(m.id)}" aria-label="削除">×</button></li>`).join('');
+    const items = (data.memos || []).map((m) => `<li class="row"><button class="memo-item" data-act="memo-edit" data-lp="memo-edit" data-id="${esc(m.id)}" aria-label="${hhmm(m.ts)} のメモを直す"><span class="muted small">${hhmm(m.ts)}</span><span class="memo-text">${esc(m.text)}</span></button><button class="icon-btn" data-act="memo-del" data-id="${esc(m.id)}" aria-label="削除">×</button></li>`).join('');
+    // ほかの日のメモ(新しい順に 3 つまで)。押すと全文
+    const past = (data.recent_memos || []).filter((m) => m && m.text);
+    const pastHTML = past.length ? `<div class="note-ex" data-act="note-ex" role="button" aria-label="ほかの日の気になったこと(押すと全文)" style="margin-top:10px"><div class="h">ほかの日の気になったこと</div>${past.map((m) => `<div class="i"><span class="d">${jpShort(m.date)}</span>${hhmm(m.ts) ? `<span class="tm">${hhmm(m.ts)}</span>` : ''}${esc(m.text)}</div>`).join('')}</div>` : '';
     return `<section class="card"><h2>気になったこと <button class="link" data-act="memo-new" data-date="${date}">＋ メモする</button></h2>
-      ${items ? `<ul style="list-style:none;margin:0;padding:0;display:grid;gap:6px">${items}</ul>` : '<p class="muted small">転んだ、むせた、動画を撮った、など。時刻つきで残ります。キーボードのマイクで声でも書けます。</p>'}
+      ${items ? `<ul style="list-style:none;margin:0;padding:0;display:grid;gap:6px">${items}</ul>` : '<p class="muted small">転んだ、むせた、動画を撮った、など。時刻つきで残ります。キーボードのマイクで声でも書けます。</p>'}${items ? '<p class="help">メモを押すと(長押しでも)、文と時刻を直せます。</p>' : ''}${pastHTML}
     </section>`;
   }
 
@@ -1034,12 +1043,25 @@
   /* ========== 下から出るシート ========== */
   const wrapSheet = (inner) => `<div class="sheet-bg" data-act="sheet-bg"><div class="sheet" role="dialog" aria-modal="true">${inner}</div></div>`;
 
+  // メモを書く・直す(sheet.id があれば直す)。時刻は 4 桁の数字
   function memoSheetHTML() {
-    return wrapSheet(`<h3>気になったこと</h3>
+    return wrapSheet(`<h3>${sheet.id ? '気になったことを直す' : '気になったこと'}</h3>
       <textarea id="memo-text" placeholder="例: 夕方に少しむせた / 立ちくらみで壁に手をついた / 動画を撮った">${esc(sheet.text || '')}</textarea>
       <p class="help">キーボードのマイクで声でも入力できます。</p>
-      <div class="actions"><button class="btn primary" data-act="memo-save">保存</button><button class="btn ghost" data-act="sheet-close">閉じる</button></div>`);
+      <label class="field" style="margin-top:10px"><span>時刻(4桁の数字。例: 1320 = 13時20分)</span>${hmInput('id="memo-time" aria-label="メモの時刻(4桁)" style="max-width:140px"', sheet.time)}</label>
+      <p class="help" id="memo-time-view">${esc(hmView(sheet.time))}</p>
+      <div class="actions"><button class="btn primary" data-act="memo-save">${sheet.id ? 'この内容に直す' : '保存'}</button><button class="btn ghost" data-act="sheet-close">閉じる</button></div>`);
   }
+  // メモの日付と時刻から ts を作る。深夜 0〜3 時台は、その日の夜の続き(日付は次の日)
+  const memoTs = (date, hm) => `${hm < '04:00' ? addDays(date, 1) : date}T${hm}`;
+  const byTs = (a, b) => (a.ts < b.ts ? -1 : a.ts > b.ts ? 1 : 0);
+  function openMemo(id) {
+    const m = (obsMemos()).find((x) => x.id === id);
+    if (!m) return;
+    sheet = { type: 'memo', id, date: m.date || curDate, text: m.text, time: hhmm(m.ts), focused: true };
+    renderOverlay();
+  }
+  const obsMemos = () => (cache && cache.memos) || [];
 
   function keySheetHTML() {
     return wrapSheet(`<h3>連携キー</h3>
@@ -1173,7 +1195,7 @@
     const isPrn = sheet.f === 'prn';
     const recent = isPrn ? prnRecent(obsNow()) : [];
     const nameField = isPrn ? `<label class="field"><span>薬の名前(空でも記録できます)</span><input type="text" id="med-name" maxlength="30" value="${esc(sheet.name || '')}" placeholder="例: 痛み止め" enterkeyhint="done" autocomplete="off"></label>
-      ${recent.length ? `<div class="chips prn-recent" style="margin:-4px 0 10px">${recent.map((n) => `<button class="chip-btn ${n === sheet.name ? 'sel' : ''}" data-act="prn-name" data-name="${esc(n)}" aria-pressed="${n === sheet.name}">${esc(n)}</button>`).join('')}</div>` : ''}` : '';
+      ${prnChips(recent, sheet.name, 'margin:-4px 0 10px')}` : '';
     return wrapSheet(`<h3>${esc(sheet.label)}</h3>
       ${nameField}
       <label class="field"><span>飲んだ時刻(4桁の数字。例: 0815 = 8時15分)</span>${hmInput('id="med-time" aria-label="飲んだ時刻(4桁)"', sheet.time)}</label>
@@ -1198,18 +1220,19 @@
     if (!askEarly(f)) toast(`${label} ${t} で記録しました`);
   }
 
-  // 他の薬(頓服など): 入れかけの名前と、前に使った名前(この端末に覚える。最大 6 つ)
+  // 他の薬(頓服など): 入れかけの名前と、前に使った名前の候補(この端末に覚える。最大 8 つ。× で消せる)
+  const PRN_NAMES_MAX = 8;
   let prnDraft = '';
   let prnNames = load(KEYS.prnNames, []);
   if (!Array.isArray(prnNames)) prnNames = [];
-  function prnRecent(o) {
-    const all = prnNames.concat(prnList(o).map((s) => prnItem(s).name));
-    return all.filter((n, i) => n && all.indexOf(n) === i).slice(0, 6);
-  }
+  const prnRecent = () => prnNames.filter((n) => typeof n === 'string' && n);
   function prnRemember(n, forget) {
-    const next = (n ? [n] : []).concat(prnNames.filter((x) => x !== n && x !== forget)).slice(0, 6);
+    const next = (n ? [n] : []).concat(prnNames.filter((x) => x !== n && x !== forget)).slice(0, PRN_NAMES_MAX);
     if (JSON.stringify(next) !== JSON.stringify(prnNames)) { prnNames = next; save(KEYS.prnNames, prnNames); }
   }
+  // 名前の候補のボタン。名前を押すと欄に入り、× で候補から消す(記録は消えない)
+  const prnChips = (names, cur, style) => (names.length ? `<div class="chips prn-recent"${style ? ` style="${style}"` : ''}>${names.map((n) =>
+    `<span class="name-chip ${n === cur ? 'sel' : ''}"><button class="nc-name" data-act="prn-name" data-name="${esc(n)}" aria-pressed="${n === cur}">${esc(n)}</button><button class="nc-x" data-act="prn-forget" data-name="${esc(n)}" aria-label="「${esc(n)}」を候補から消す">×</button></span>`).join('')}</div>` : '');
   // 記録を足す(replace があれば、その記録を直す)。名前を直した時は、前の名前(打ちまちがい)を候補から外す
   function addPrn(t, name, replace) {
     const item = prnStr(t, name);
@@ -1219,7 +1242,8 @@
     else prnDraft = '';
     list.push(item);
     const old = replace ? prnItem(replace).name : '';
-    prnRemember(nm, old && !list.some((s) => prnItem(s).name === old) ? old : '');
+    // 名前を変えずに時刻だけ直した時は、候補を増やさない(× で消した名前が戻らないように)
+    prnRemember(replace && nm === old ? '' : nm, old && !list.some((s) => prnItem(s).name === old) ? old : '');
     savePrn(list);
     const what = `他の薬${nm ? `(${nm})` : ''} ${t}`;
     if (replace) toast(`${what} に直しました`);
@@ -1248,11 +1272,22 @@
   }
   function memoSave() {
     const text = (sheet.text || '').trim();
-    if (!text) { sheet = null; renderOverlay(); return; }
-    const date = sheet.date; const clientId = uid(); const ts = fmtTime(new Date());
-    enqueue({ action: 'addMemo', date, ts, text, clientId }, (c) => { if (date === c.date) (c.memos = c.memos || []).push({ id: clientId, date, ts, text }); });
+    if (!text && !sheet.id) { sheet = null; renderOverlay(); return; }
+    if (!text) { toast('メモが空です。消す時は、メモの横の × を押してください'); return; }
+    const hm = parseHm(sheet.time);
+    if (!hm) { toast('時刻を4桁の数字で入れてください(例: 1320)'); return; }
+    const date = sheet.date; const ts = memoTs(date, hm);
+    if (sheet.id) { // 直す
+      const id = sheet.id;
+      enqueue({ action: 'updateMemo', id, text, ts }, (c) => { c.memos = (c.memos || []).map((m) => (m.id === id ? Object.assign({}, m, { text, ts }) : m)).sort(byTs); });
+      sheet = null; renderOverlay();
+      toast(`${hm} のメモに直しました`);
+      return;
+    }
+    const clientId = uid();
+    enqueue({ action: 'addMemo', date, ts, text, clientId }, (c) => { if (date === c.date) c.memos = (c.memos || []).concat([{ id: clientId, date, ts, text }]).sort(byTs); });
     sheet = null; renderOverlay();
-    toast('メモしました');
+    toast(`${hm} でメモしました`);
   }
   function saveSettings(form) {
     const f = new FormData(form);
@@ -1464,6 +1499,8 @@
       lpTimer = null; lpFired = true;
       try { if (navigator.vibrate) navigator.vibrate(15); } catch (err) { /* 無視 */ }
       if (el.dataset.lp === 'prn') openMedTime('prn', '', el.dataset.label);
+      else if (el.dataset.lp === 'prn-edit') { const s = prnList(obsNow())[parseInt(el.dataset.i, 10)]; if (s) openMedTime('prn', '', '他の薬を直す', s); }
+      else if (el.dataset.lp === 'memo-edit') openMemo(el.dataset.id);
       else openMedTime(el.dataset.f, el.dataset.v, el.dataset.label);
     }, 500);
   });
@@ -1542,6 +1579,16 @@
         render();
         break;
       }
+      case 'note-ex': el.classList.toggle('open'); break; // ほかの日の備考: 押すと全文、もう一度押すと 1 行ずつ
+      case 'prn-forget': {
+        const n = el.dataset.name;
+        if (!n || !confirm(`「${n}」を名前の候補から消しますか？\n(これまでの記録は消えません)`)) break;
+        prnNames = prnNames.filter((x) => x !== n); save(KEYS.prnNames, prnNames);
+        if (prnClean(prnDraft) === n) prnDraft = '';
+        if (sheet && sheet.type === 'medtime') renderOverlay();
+        render();
+        break;
+      }
       case 'prn-edit': {
         const s = prnList(obsNow())[parseInt(el.dataset.i, 10)];
         if (s) openMedTime('prn', '', '他の薬を直す', s);
@@ -1562,7 +1609,8 @@
       }
       case 'order-reset': saveOrder(CARD_DEFS.map((d) => d[0])); toast('最初の並びに戻しました'); break;
       case 'wake-now': saveObs({ wake_time: nowHm() }); break;
-      case 'memo-new': sheet = { type: 'memo', date: el.dataset.date, text: '' }; renderOverlay(); break;
+      case 'memo-new': sheet = { type: 'memo', date: el.dataset.date, text: '', time: nowHm() }; renderOverlay(); break;
+      case 'memo-edit': openMemo(el.dataset.id); break;
       case 'memo-save': memoSave(); break;
       case 'memo-del': {
         const id = el.dataset.id;
@@ -1685,6 +1733,7 @@
     if (!sheet) return;
     const t = e.target;
     if (t.id === 'med-name') sheet.name = t.value;
+    if (t.id === 'memo-time') { sheet.time = t.value; const v = document.getElementById('memo-time-view'); if (v) v.textContent = hmView(t.value); }
     if (t.id === 'memo-text') sheet.text = t.value;
     if (t.id === 'med-time') { sheet.time = t.value; const v = document.getElementById('med-time-view'); if (v) v.textContent = hmView(t.value); }
     if (t.id === 'react-label') { sheet.label = t.value; const b = document.querySelector('.react-preview b'); if (b) b.textContent = t.value || '…'; }
@@ -1699,7 +1748,7 @@
   document.addEventListener('keydown', (e) => {
     if (e.key === 'Enter' && e.target && e.target.id === 'med-time') { e.preventDefault(); medTimeSave(); }
     else if (e.key === 'Enter' && e.target && e.target.dataset && e.target.dataset.obsHm) e.target.blur();
-    else if (e.key === 'Enter' && e.target && (e.target.id === 'prn-name' || e.target.id === 'med-name')) { e.preventDefault(); e.target.blur(); }
+    else if (e.key === 'Enter' && e.target && (e.target.id === 'prn-name' || e.target.id === 'med-name' || e.target.id === 'memo-time')) { e.preventDefault(); e.target.blur(); }
   });
 
   document.addEventListener('submit', (e) => {

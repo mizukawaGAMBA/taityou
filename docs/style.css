@@ -330,7 +330,23 @@ canvas.confetti { position: fixed; inset: 0; pointer-events: none; z-index: 55; 
 .prn-row input[type=text] { flex: 1; min-width: 0; min-height: 40px; padding: 6px 10px; }
 .prn-row .chip-btn { flex: none; }
 .prn-recent, .prn-items { margin-top: 6px; }
-.prn-recent .chip-btn { min-height: 34px; padding: 3px 10px; font-size: 0.85rem; font-weight: 600; }
+/* 名前の候補: 名前を押すと欄に入る。右の × で候補から消す */
+.name-chip { display: inline-flex; align-items: stretch; border: 2px solid var(--line); border-radius: 12px; background: var(--bg); overflow: hidden; }
+.name-chip.sel { background: var(--honey-soft); border-color: var(--honey-dark); }
+.name-chip .nc-name { min-height: 34px; padding: 3px 6px 3px 10px; font-size: 0.85rem; font-weight: 600; }
+.name-chip .nc-x { min-width: 34px; padding: 0 8px; color: var(--muted); font-size: 0.95rem; border-left: 1px solid var(--line); }
+.pill .pill-t { -webkit-touch-callout: none; -webkit-user-select: none; user-select: none; touch-action: manipulation; }
+/* 備考欄の下: ほかの日に書いた備考(1 行ずつ。押すと全文) */
+.note-ex { margin: 4px 0 0; padding: 2px 0 2px 8px; border-left: 3px solid var(--line); font-size: 0.75rem; color: var(--muted); line-height: 1.4; cursor: pointer; }
+.note-ex .h { font-weight: 600; }
+.note-ex .i { white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+.note-ex.open .i { white-space: normal; }
+.note-ex .d { display: inline-block; min-width: 2.9em; margin-right: 4px; font-variant-numeric: tabular-nums; }
+.note-ex .tm { margin-right: 6px; font-variant-numeric: tabular-nums; }
+/* 気になったこと: メモを押す(長押しでも)と、文と時刻を直せる */
+.memo-item { flex: 1; min-width: 0; display: flex; gap: 8px; align-items: baseline; text-align: left; min-height: 32px;
+  -webkit-touch-callout: none; -webkit-user-select: none; user-select: none; touch-action: manipulation; }
+.memo-item .memo-text { flex: 1; min-width: 0; white-space: pre-wrap; word-break: break-word; text-decoration: underline dotted var(--muted); text-underline-offset: 3px; }
 .pill .pill-t { min-height: 28px; font-weight: 600; text-align: left; text-decoration: underline dotted var(--muted); text-underline-offset: 3px; }
 /* カテゴリーごとの備考(1 行から始めて、書いた分だけ伸びる) */
 label.note-field { display: flex; gap: 8px; align-items: flex-start; margin-top: 8px; }

@@ -273,7 +273,7 @@ function toCell(v) {
  * 日付は「論理日」(午前4時区切り)の "YYYY-MM-DD" 文字列。時刻は "HH:MM"。
  * ===================================================================== */
 var Core = (function () {
-  var VERSION = 11;
+  var VERSION = 13;
   var IMAGE_PARTS = 10;       // 1 枚の画像を最大 10 個のセルに分けて入れる
   var IMAGE_CHUNK = 40000;    // 1 セルに入れる文字数(セルの上限は 50,000 文字)
   var IMAGE_META_COLS = 7;    // 画像の表の、データ以外の列の数
@@ -807,6 +807,34 @@ var Core = (function () {
   };
 
   // 記録する人の画面: その日の観察・自動の値・メモ
+  // 備考欄の書き方をそろえるため、ほかの日に書いた備考を、欄ごとに新しい順で 3 つまで渡す(同じ文は 1 つに)
+  var NOTE_EXAMPLES = 3;
+  function recentNotes(all, date, sd) {
+    var rows = all.filter(function (r) { return r.date !== date && (!sd || r.date >= sd); })
+      .sort(function (a, b) { return a.date < b.date ? 1 : -1; });
+    var out = {};
+    Object.keys(OBS_TEXTS).forEach(function (k) {
+      var seen = {}, list = [];
+      for (var i = 0; i < rows.length && list.length < NOTE_EXAMPLES; i++) {
+        var t = toStr(rows[i][k]).trim();
+        if (!t || seen[t]) continue;
+        seen[t] = true;
+        list.push({ date: rows[i].date, text: t.length > 120 ? t.slice(0, 120) + '…' : t });
+      }
+      out[k] = list;
+    });
+    return out;
+  }
+
+  // 「気になったこと」も、ほかの日のメモを新しい順に 3 つまで渡す
+  function recentMemos(store, date, sd) {
+    return store.all('memo').map(normMemo)
+      .filter(function (r) { return !r.deleted && r.text && r.date !== date && (!sd || r.date >= sd); })
+      .sort(function (a, b) { return a.date !== b.date ? (a.date < b.date ? 1 : -1) : (a.ts < b.ts ? 1 : -1); })
+      .slice(0, NOTE_EXAMPLES)
+      .map(function (m) { return { date: m.date, ts: m.ts, text: m.text.length > 120 ? m.text.slice(0, 120) + '…' : m.text }; });
+  }
+
   actions.state = function (req, store, env, device) {
     var date = isDateStr(req.date) ? req.date : null;
     if (!date) throw fail('bad_request', 'date が必要です');
@@ -823,6 +851,8 @@ var Core = (function () {
     var earlyPrev = prev && prev.early_bed === 1 && EARLY_NIGHT_RE.test(prev.med_night) ? prev.med_night.split(' ')[1] : '';
     return {
       ok: true, date: date, early_prev: earlyPrev,
+      recent_notes: recentNotes(all, date, sd),
+      recent_memos: recentMemos(store, date, sd),
       obs: findOne(all, 'date', date),
       health: findOne(healthBetween(store, date, date), 'date', date),
       memos: memosBetween(store, date, date),
@@ -897,6 +927,29 @@ var Core = (function () {
     var row = { id: env.uuid(), date: req.date, ts: isTimeStr(req.ts) ? req.ts : req.date + 'T00:00', text: text.slice(0, 2000), deleted: 0, created_at: env.now() };
     store.insert('memo', row);
     return { ok: true, memo: normMemo(row), clientId: req.clientId || null };
+  };
+
+  // メモの文と時刻を直す。時刻はそのメモの日(深夜 0〜3 時台は次の日付)の中だけ
+  actions.updateMemo = function (req, store, env, device) {
+    if (!req.id) throw fail('bad_request', 'id が必要です');
+    var cur = findOne(store.all('memo').map(normMemo), 'id', String(req.id));
+    if (!cur || cur.deleted) throw fail('not_found', 'メモが見つかりません');
+    var patch = {};
+    if ('text' in req) {
+      var text = toStr(req.text).trim();
+      if (!text) throw fail('bad_request', 'メモが空です');
+      patch.text = text.slice(0, 2000);
+    }
+    if ('ts' in req) {
+      var ts = toStr(req.ts);
+      var day = ts.slice(0, 10);
+      if (!isTimeStr(ts) || (day !== cur.date && !(day === addDays(cur.date, 1) && ts.slice(11) < '04:00'))) throw fail('bad_request', '時刻の形が正しくありません');
+      patch.ts = ts;
+    }
+    var keys = Object.keys(patch);
+    if (!keys.length || keys.every(function (k) { return patch[k] === cur[k]; })) return { ok: true, memo: cur };
+    store.update('memo', 'id', cur.id, patch);
+    return { ok: true, memo: normMemo(Object.assign({}, cur, patch)) };
   };
 
   actions.deleteMemo = function (req, store, env, device) {
@@ -1142,7 +1195,7 @@ var Core = (function () {
   // health(ショートカットの連携キー): 健康データを送ることだけ
   var ALLOW = {
     patient:   ['me', 'room', 'seenReactions', 'consentHealth', 'getImage'],
-    supporter: ['me', 'state', 'saveObs', 'addMemo', 'deleteMemo', 'react', 'reactions', 'getSettings', 'saveSettings', 'report',
+    supporter: ['me', 'state', 'saveObs', 'addMemo', 'updateMemo', 'deleteMemo', 'react', 'reactions', 'getSettings', 'saveSettings', 'report',
                 'createKey', 'consentHealth', 'getImage', 'uploadImage', 'deleteImage', 'saveImageConfig'],
     health:    ['health', 'need']
   };
