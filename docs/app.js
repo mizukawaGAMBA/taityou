@@ -7,7 +7,7 @@
   'use strict';
 
   /* ========== 保存(localStorage) ========== */
-  const KEYS = { cfg: 'kuma.cfg', state: 'kuma.state3', queue: 'kuma.queue', idmap: 'kuma.idmap', thanked: 'kuma.thanked', look: 'kuma.look', prnNames: 'kuma.prnNames' };
+  const KEYS = { cfg: 'kuma.cfg', state: 'kuma.state3', queue: 'kuma.queue', idmap: 'kuma.idmap', thanked: 'kuma.thanked', look: 'kuma.look', prnNames: 'kuma.prnNames', wx: 'kuma.wxAt' };
   function load(k, def) { try { const v = localStorage.getItem(k); return v === null ? def : JSON.parse(v); } catch (e) { return def; } }
   function save(k, v) { try { localStorage.setItem(k, JSON.stringify(v)); } catch (e) { /* 保存できない環境でも動かす */ } }
 
@@ -385,7 +385,7 @@
     try {
       const data = await call(cfg.role === 'supporter' ? { action: 'state', date: curDate } : { action: 'room' });
       if (data.ok && (seq !== editSeq || (cfg.role === 'supporter' && data.date !== curDate))) stale = true; // 読み込み中に変更や日付の移動があった → 読み直す
-      else if (data.ok) { cache = data; save(KEYS.state, cache); render(); }
+      else if (data.ok) { cache = data; save(KEYS.state, cache); render(); syncWeather(data); }
       else if (data.error === 'unauthorized') logout('ログインし直してください');
       else if (!silent) toast(data.message || '読み込みに失敗しました');
     } catch (e) {
@@ -393,6 +393,105 @@
     }
     refreshing = false; renderSync();
     if (stale && !queue.length) refresh(true);
+  }
+
+  /* ========== 天気と気圧 ==========
+   * 記録する人の iPhone が、天気のサービス(Open-Meteo。登録なし・無料)から 1 時間ごとの気圧と気温を取り、
+   * 日ごとにまとめてスプレッドシートへ送る。送るのは設定の場所(緯度・経度、約 1km の粗さ)だけ。
+   * 取りに行く日はサーバーが決める(state の weather_need)。取れなくても記録には関係しないので、だまって次の機会に */
+  const WX_API = 'https://api.open-meteo.com/v1/forecast';
+  const WX_GEO = 'https://geocoding-api.open-meteo.com/v1/search';
+  const WX_BACK = 90; // 天気のサービスが返せるのは、だいたい 3 か月前まで
+  let wxBusy = false, wxAnnounce = false;
+  async function syncWeather(data) {
+    const s = (data && data.settings) || {};
+    if (cfg.role !== 'supporter' || wxBusy || !data.weather_need || !s.weather_place) return;
+    if (Date.now() - (Number(load(KEYS.wx, 0)) || 0) < 15 * 60e3) return; // 取りに行くのは 15 分に 1 回まで
+    wxBusy = true; save(KEYS.wx, Date.now());
+    const [lat, lon] = s.weather_place.split(',');
+    const today = fmtDate(new Date()); // 天気は 0 時区切りの日
+    let from = data.weather_need;
+    if (from < addDays(today, -WX_BACK)) from = addDays(today, -WX_BACK);
+    let saved = -1;
+    try {
+      const q = `latitude=${encodeURIComponent(lat)}&longitude=${encodeURIComponent(lon)}&hourly=pressure_msl,temperature_2m,relative_humidity_2m` +
+        `&daily=weather_code,temperature_2m_max,temperature_2m_min,precipitation_sum&timezone=Asia%2FTokyo&start_date=${from}&end_date=${today}`;
+      const j = await (await fetch(`${WX_API}?${q}`)).json();
+      const H = j && j.hourly, D = j && j.daily;
+      if (!H || !D || !Array.isArray(H.time) || !Array.isArray(D.time)) throw new Error((j && j.reason) || 'weather');
+      const byDay = {};
+      H.time.forEach((t, k) => { (byDay[String(t).slice(0, 10)] = byDay[String(t).slice(0, 10)] || []).push(k); });
+      const days = D.time.map((d, i) => {
+        const pick = (arr) => (byDay[d] || []).map((k) => (arr ? arr[k] : null));
+        const at = (arr) => (arr ? arr[i] : null);
+        return { date: d, p: pick(H.pressure_msl), t: pick(H.temperature_2m), h: pick(H.relative_humidity_2m),
+          t_max: at(D.temperature_2m_max), t_min: at(D.temperature_2m_min), precip: at(D.precipitation_sum), wcode: at(D.weather_code), final: d < today ? 1 : 0 };
+      });
+      const r = await call({ action: 'saveWeather', place: s.weather_place, days });
+      if (r.ok) saved = r.dates.length;
+      else if (r.error === 'place_changed') save(KEYS.wx, 0);
+    } catch (e) { /* 次の機会に */ }
+    wxBusy = false;
+    if (wxAnnounce) { wxAnnounce = false; toast(saved >= 0 ? `天気と気圧を ${saved}日分 取り込みました` : '天気と気圧を取り込めませんでした。あとでもう一度試します'); }
+    if (saved > 0) refresh(true);
+  }
+  // 天気の種類(WMO の番号)→ [絵, ことば]。その日のうちで、いちばん崩れた時の天気
+  function wxLabel(c) {
+    if (c == null) return ['', ''];
+    if (c === 0) return ['☀️', '快晴'];
+    if (c === 1) return ['🌤️', '晴れ'];
+    if (c === 2) return ['⛅', '晴れ時々くもり'];
+    if (c === 3) return ['☁️', 'くもり'];
+    if (c === 45 || c === 48) return ['🌫️', '霧'];
+    if (c >= 51 && c <= 57) return ['🌦️', '霧雨'];
+    if (c >= 61 && c <= 67) return ['🌧️', c === 65 || c === 67 ? '強い雨' : '雨'];
+    if (c >= 71 && c <= 77) return ['🌨️', '雪'];
+    if (c >= 80 && c <= 82) return ['🌦️', 'にわか雨'];
+    if (c === 85 || c === 86) return ['🌨️', 'にわか雪'];
+    if (c >= 95) return ['⛈️', '雷雨'];
+    return ['', ''];
+  }
+  const signed = (v, dg) => (v == null ? '' : (v > 0 ? '+' : v < 0 ? '−' : '±') + Math.abs(v).toFixed(dg));
+  // 記録の画面の上に出す 1 行(押すと 3 時間ごとの気圧と気温)
+  function weatherLine(w, isToday) {
+    if (!w || w.p_mean == null) return '';
+    const [ico, label] = wxLabel(w.wcode);
+    const temp = w.t_max != null && w.t_min != null ? `${Math.round(w.t_min)}〜${Math.round(w.t_max)}℃` : '';
+    const hp = (w.hourly && Array.isArray(w.hourly.p)) ? w.hourly.p : [];
+    const ht = (w.hourly && Array.isArray(w.hourly.t)) ? w.hourly.t : [];
+    const hours = [];
+    for (let h = 0; h < hp.length; h += 3) if (hp[h] != null) hours.push(`<span>${h}時 <b>${Math.round(hp[h])}</b>${ht[h] != null ? ` ${Math.round(ht[h])}℃` : ''}</span>`);
+    return `<details class="wx"><summary><span class="wx-main">${ico ? `<span aria-hidden="true">${ico}</span>` : ''}${esc(label)}${temp ? ` ${temp}` : ''}</span>
+        <span class="wx-p">気圧 <b>${Math.round(w.p_mean)}</b> hPa${w.p_diff != null ? `<small>(前日より ${signed(w.p_diff, 1)})</small>` : ''}</span></summary>
+      <div class="wx-more">${w.p_drop != null ? `<p>1日の中で下がった幅: <b>${w.p_drop.toFixed(1)}</b> hPa${w.precip ? ` ・ 雨 ${w.precip} mm` : ''}${w.humidity != null ? ` ・ 湿度 ${w.humidity}%` : ''}</p>` : ''}
+        ${hours.length ? `<div class="wx-hours">${hours.join('')}</div>` : ''}
+        <p class="help">住まいの地域の気象データ(Open-Meteo)。気圧は海面気圧の1日の平均${isToday && !w.final ? '。きょうの分は、この先の時間の予報を含みます' : ''}。</p></div></details>`;
+  }
+  // 設定の「天気を調べる場所」を保存する。数字(緯度,経度)か、市の名前(天気のサービスで探す)
+  async function saveWeatherPlace(form) {
+    const raw = String(new FormData(form).get('weather_place') || '').trim();
+    let place = '', found = '';
+    if (raw) {
+      const t = raw.replace(/[０-９．，－]/g, (c) => String.fromCharCode(c.charCodeAt(0) - 0xFEE0));
+      const m = /^(-?\d{1,2}(?:\.\d+)?)\s*[,、\s]\s*(-?\d{1,3}(?:\.\d+)?)$/.exec(t);
+      if (m && Math.abs(+m[1]) <= 90 && Math.abs(+m[2]) <= 180) place = `${(+m[1]).toFixed(2)},${(+m[2]).toFixed(2)}`;
+      else {
+        toast('場所を探しています…');
+        try {
+          const j = await (await fetch(`${WX_GEO}?name=${encodeURIComponent(raw)}&count=1&language=ja&countryCode=JP`)).json();
+          const g = j && Array.isArray(j.results) && j.results[0];
+          if (!g || typeof g.latitude !== 'number') { toast('その名前では見つかりませんでした。市の名前か、緯度,経度の数字で入れてください'); return; }
+          place = `${g.latitude.toFixed(2)},${g.longitude.toFixed(2)}`;
+          found = [g.admin1, g.name].filter((x, i, a) => x && a.indexOf(x) === i).join(' ');
+        } catch (e) { toast('通信できませんでした'); return; }
+      }
+    }
+    if (place === String(settingsNow().weather_place || '')) { toast(place ? 'この場所で保存ずみです' : '天気と気圧は取り込んでいません'); render(); return; }
+    const settings = { weather_place: place };
+    save(KEYS.wx, 0); wxAnnounce = !!place;
+    enqueue({ action: 'saveSettings', settings }, (c) => { c.settings = Object.assign({}, c.settings, settings); c.weather = null; });
+    listData = null;
+    toast(place ? `${found ? found + ' の' : ''}場所(${place})を保存しました。天気を取り込みます…` : '天気と気圧の取り込みを止めました');
   }
 
   function logout(msg) {
@@ -604,7 +703,7 @@
       alcohol: () => card('アルコール', scaleField('alcohol', o, '', true) + noteField(o, 'note_alcohol', '例: 夕食でビール1杯')),
       memo: () => memoCard(data, curDate)
     };
-    return nav + progress + cardOrder(s).map((k) => cards[k]()).join('') +
+    return nav + progress + weatherLine(data.weather, isToday) + cardOrder(s).map((k) => cards[k]()).join('') +
       `<p class="help center" style="margin:2px 0 12px">押した内容はその場で保存されます。</p>`;
   }
 
@@ -719,6 +818,19 @@
   const LIST_NAMES = { sleep: '眠り・歩数・歩き方(自動)' };
   const NOTE_OF = { morning: 'note_morning', day: 'note_day', look: 'complaint_note', meds: 'note_meds', alcohol: 'note_alcohol' };
   const NOTE_LABELS = [['note_morning', '朝'], ['note_day', '日中'], ['complaint_note', '見た目・ことば'], ['good_note', 'できたこと'], ['note_meds', '薬'], ['note_alcohol', 'アルコール']];
+  // 一覧のいちばん下: 天気と気圧(その週に値がある時だけ)
+  function weatherRows(days, td) {
+    const wBy = {};
+    ((listData && listData.weather) || []).forEach((w) => { wBy[w.date] = w; });
+    if (!days.some((d) => wBy[d])) return '';
+    const row = (label, fn) => `<tr><td class="lbl">${label}</td>${days.map((d) => td(d, wBy[d] ? fn(wBy[d]) : '')).join('')}</tr>`;
+    return `<tr class="cat"><th colspan="${days.length + 1}">天気・気圧(自動)</th></tr>` +
+      row('天気', (w) => wxLabel(w.wcode)[0]) +
+      row('気温', (w) => (w.t_max != null && w.t_min != null ? `${Math.round(w.t_max)}<small>/${Math.round(w.t_min)}</small>` : '')) +
+      row('気圧', (w) => (w.p_mean != null ? String(Math.round(w.p_mean)) : '')) +
+      row('前日比', (w) => (w.p_diff != null ? signed(Math.round(w.p_diff), 0).replace('±', '') : '')) +
+      row('下がった幅', (w) => (w.p_drop != null ? String(Math.round(w.p_drop)) : ''));
+  }
   let listPage = 0;        // 0 = きょうまでの 7 日、1 = その前の 7 日 …
   let listLoading = false, listFailed = false;
   function viewList() {
@@ -757,7 +869,7 @@
       const nk = NOTE_OF[k];
       if (nk && days.some((d) => obsBy[d] && obsBy[d][nk])) rows += `<tr><td class="lbl">備考</td>${days.map((d) => td(d, obsBy[d] && obsBy[d][nk] ? '✎' : '')).join('')}</tr>`;
       return `<tr class="cat"><th colspan="${days.length + 1}">${esc(name)}</th></tr>${rows}`;
-    }).join('');
+    }).join('') + weatherRows(days, td);
     const nav = `<div class="row date-nav"><button class="btn outline nav-btn" data-act="list-page" data-d="1" aria-label="前の7日" ${sd && start <= sd ? 'disabled' : ''}>◀</button>
       <div class="spacer center"><b>${jpShort(start)}〜${jpShort(end)}</b></div>
       <button class="btn outline nav-btn" data-act="list-page" data-d="-1" aria-label="次の7日" ${listPage === 0 ? 'disabled' : ''}>▶</button></div>`;
@@ -769,7 +881,8 @@
       <li>食事: 多 よく食べた 普 ふつう 半 半分くらい 少 少し × ほぼ食べず / 間食: ● 寝る前の間食</li>
       <li>見た目: 不随意運動 1〜5 / ことば: 痛 痛み ぐ ぐるぐる 他 その他</li>
       <li>楽な時間: 朝 昼 夕 夜 / 薬: ● 全部・飲んだ ◐ ${esc(medName(s))}以外 ◔ 一部 ○ 飲まなかった / 早く休んだ: ● 寝る前の薬が18時より前で「合っている」を押した日(その夜の眠りは次の日の列)</li>
-      <li>歩く速さ km/時 / 歩幅 cm / 左右差(歩行非対称性)・両足支持(両足で支えている時間)・歩行安定性 % / 安静時心拍 回/分 / 心拍変動 ms(歩き方は iPhone をポケットに入れて歩いた日だけ)</li></ul></details>`;
+      <li>歩く速さ km/時 / 歩幅 cm / 左右差(歩行非対称性)・両足支持(両足で支えている時間)・歩行安定性 % / 安静時心拍 回/分 / 心拍変動 ms(歩き方は iPhone をポケットに入れて歩いた日だけ)</li>
+      <li>天気・気圧: 気温 = 最高/最低 ℃ / 気圧 = 1日の平均 hPa / 前日比 = 前の日の平均との差 / 下がった幅 = その日の中でいちばん下がった幅 hPa(0時〜24時の1日)</li></ul></details>`;
     const notes = days.slice().reverse().map((d) => {
       const o = obsBy[d] || {};
       const items = NOTE_LABELS.filter(([k]) => o[k]).map(([k, l]) => `<li><b>${l}</b>${esc(o[k])}</li>`)
@@ -796,7 +909,7 @@
     const sd = startDate(s) || addDays(today, -41);
     if (!exportRange) exportRange = { from: sd, to: today };
     return `<section class="card"><h2>分析用にデータを保存</h2>
-      <p class="small" style="margin-bottom:8px">選んだ期間の記録(観察・薬・メモ・眠り・歩数・歩き方と心拍の時刻ごとの値)をファイルに書き出します。パソコンで開いて押すと「ダウンロード」フォルダに入ります。</p>
+      <p class="small" style="margin-bottom:8px">選んだ期間の記録(観察・薬・メモ・眠り・歩数・歩き方と心拍の時刻ごとの値・天気と気圧)をファイルに書き出します。パソコンで開いて押すと「ダウンロード」フォルダに入ります。</p>
       <div class="row"><div style="flex:1"><label class="field"><span>開始日</span><input type="date" data-export="from" value="${esc(exportRange.from)}" min="${sd}" max="${today}"></label></div>
         <div style="flex:1"><label class="field"><span>終了日</span><input type="date" data-export="to" value="${esc(exportRange.to)}" min="${sd}" max="${today}"></label></div></div>
       <div class="btn-col"><button class="btn" data-act="export" data-fmt="json">データ一式を保存(分析用・JSON)</button>
@@ -838,6 +951,13 @@
       walk_asym: '歩行非対称性(%)', double_support: '両足支持時間(%)', steadiness: '歩行安定性(%)', resting_hr: '安静時心拍数(回/分)', hrv: '心拍変動(ms)',
       metric_series: '1日の中の時刻ごとの値 { 項目: [[時刻, 値], ...] }(単位は上と同じ)'
     };
+    codes.weather = {
+      note: '住まいの地域の気象データ(Open-Meteo)。日付は 0 時〜24 時の1日(観察の日付は朝4時区切り)',
+      weather: 'その日のうちで、いちばん崩れた時の天気(wcode = WMO の番号)', t_max: '最高気温(℃)', t_min: '最低気温(℃)', t_mean: '平均気温(℃)',
+      humidity: '平均湿度(%)', precip: '降水量(mm)', p_mean: '海面気圧の1日の平均(hPa)', p_min: '気圧の最低(hPa)', p_max: '気圧の最高(hPa)',
+      p_drop: 'その日の中で、それまでの最高から下がったいちばん大きな幅(hPa)', p_diff: '前の日の平均気圧との差(hPa)',
+      hourly: '1時間ごとの値 { p: 気圧 hPa [0時, 1時, …], t: 気温 ℃ [...] }', final: '1 = その日の分がそろっている(0 = 取った時点では途中で、予報を含む)'
+    };
     return codes;
   }
   function exportJson(data) {
@@ -846,7 +966,9 @@
       format: 'kuma-export-1', exported_at: new Date().toISOString(), from: data.from, to: data.to,
       settings: Object.fromEntries(['start_date', 'med2_label', 'last_appointment', 'next_appointment'].map((k) => [k, s[k] || ''])),
       codes: exportCodes(s),
-      observe: data.obs, health: data.health, memos: (data.memos || []).map((m) => ({ date: m.date, ts: m.ts, text: m.text }))
+      observe: data.obs, health: data.health, memos: (data.memos || []).map((m) => ({ date: m.date, ts: m.ts, text: m.text })),
+      weather: (data.weather || []).map((w) => ({ date: w.date, weather: wxLabel(w.wcode)[1], wcode: w.wcode, t_max: w.t_max, t_min: w.t_min, t_mean: w.t_mean,
+        humidity: w.humidity, precip: w.precip, p_mean: w.p_mean, p_min: w.p_min, p_max: w.p_max, p_drop: w.p_drop, p_diff: w.p_diff, hourly: w.hourly, final: w.final }))
     };
   }
   function exportCsv(data) {
@@ -854,10 +976,12 @@
     const name = (k, v) => (v == null || !SCALES[k] ? '' : ((SCALES[k].opts.find(([x]) => x === v) || [])[1] || String(v)));
     const setNames = (v, list) => list.filter(([k]) => String(v || '').split(',').includes(k)).map(([, l]) => l).join('・');
     const medState = { all: `${medName(s)}全部`, part: '一部', noc: `${medName(s)}以外`, yes: '飲んだ', no: '飲まなかった' };
-    const obsBy = {}, hBy = {}, memoBy = {};
+    const obsBy = {}, hBy = {}, memoBy = {}, wBy = {};
     data.obs.forEach((o) => { obsBy[o.date] = o; });
     data.health.forEach((h) => { hBy[h.date] = h; });
     (data.memos || []).forEach((m) => { (memoBy[m.date] = memoBy[m.date] || []).push(`${hhmm(m.ts)} ${m.text}`); });
+    (data.weather || []).forEach((w) => { wBy[w.date] = w; });
+    const wx = (k) => (d) => (wBy[d] ? wBy[d][k] : '');
     const cols = [
       ['日付', (d) => d], ['曜日', (d) => DOW[dowOf(d)]],
       ['起きてきた時刻', (d, o) => o.wake_time || ''], ['起き上がり', (d, o) => name('getup', o.getup)], ['ふらつき', (d, o) => name('gait', o.gait)],
@@ -874,7 +998,9 @@
       ['歩く速さ(km/時)', (d, o, h) => h.walking_speed], ['歩幅(cm)', (d, o, h) => h.step_length], ['歩行非対称性(%)', (d, o, h) => h.walk_asym],
       ['両足支持時間(%)', (d, o, h) => h.double_support], ['歩行安定性(%)', (d, o, h) => h.steadiness], ['安静時心拍数', (d, o, h) => h.resting_hr], ['心拍変動(ms)', (d, o, h) => h.hrv],
       ['備考(朝)', (d, o) => o.note_morning], ['備考(日中)', (d, o) => o.note_day], ['備考(見た目・ことば)', (d, o) => o.complaint_note],
-      ['できたこと', (d, o) => o.good_note], ['備考(薬)', (d, o) => o.note_meds], ['備考(アルコール)', (d, o) => o.note_alcohol], ['気になったこと(メモ)', (d) => (memoBy[d] || []).join(' / ')]
+      ['できたこと', (d, o) => o.good_note], ['備考(薬)', (d, o) => o.note_meds], ['備考(アルコール)', (d, o) => o.note_alcohol], ['気になったこと(メモ)', (d) => (memoBy[d] || []).join(' / ')],
+      ['天気', (d) => (wBy[d] ? wxLabel(wBy[d].wcode)[1] : '')], ['最高気温(℃)', wx('t_max')], ['最低気温(℃)', wx('t_min')], ['降水量(mm)', wx('precip')],
+      ['気圧(1日の平均 hPa)', wx('p_mean')], ['気圧の前日比(hPa)', wx('p_diff')], ['気圧のその日の中で下がった幅(hPa)', wx('p_drop')]
     ];
     const cell = (v) => { const t = v == null ? '' : String(v); return /[",\r\n]/.test(t) ? '"' + t.replace(/"/g, '""') + '"' : t; };
     const lines = [cols.map(([h]) => cell(h)).join(',')];
@@ -981,9 +1107,23 @@
       <button type="submit" class="btn primary" style="margin-top:4px">設定を保存</button>
     </form>
     ${orderCardHTML(s)}
+    ${weatherCardHTML(s)}
     ${healthAdminHTML(s)}
     <section class="card"><h2>この端末</h2><p class="small">ログイン中: ${esc(cfg.name || '')}(記録する人)</p>
       <button class="btn ghost" data-act="logout" style="margin-top:8px">ログアウト</button></section>`;
+  }
+
+  // 天気と気圧: 調べる場所(数字か市の名前)
+  function weatherCardHTML(s) {
+    const on = !!s.weather_place;
+    return `<section class="card"><h2>天気と気圧 <span class="link">自動</span></h2>
+      <p class="small" style="margin-bottom:8px">記録する人のアプリを開いた時に、その日の天気・気温・気圧(1時間ごと)を天気のサービス(Open-Meteo。登録なし・無料)から取り、記録と一緒に残します。気圧の変化と体調の関係を見るためです。記録の画面のいちばん上、一覧、レポート、分析用のファイルに出ます。</p>
+      <form id="weather-form">
+        <label class="field"><span>天気を調べる場所</span><input type="text" name="weather_place" value="${esc(s.weather_place || '')}" placeholder="例: 35.68,139.77 または 横浜市" autocomplete="off" enterkeyhint="done">
+          <div class="help">「緯度,経度」の数字か、市の名前。区の名前では探せないので、区で決めたい時は数字で入れます(地図アプリで場所を長押しすると出ます)。天気のサービスに送るのは、この位置(約1kmの粗さ)だけです。空にして保存すると止まります。</div></label>
+        <button type="submit" class="btn">場所を保存</button>
+      </form>
+      <p class="help">${on ? `いまの場所: ${esc(s.weather_place)}。記録の開始日の前の日から、きょうまでの分が入ります(3か月より前の分は取れません)。` : 'いまは取り込んでいません。'}</p></section>`;
   }
 
   // 記録画面のカテゴリーの並び順(↑↓ で入れ替え、すぐ保存)
@@ -1755,6 +1895,7 @@
     if (e.target.id === 'login-form') { e.preventDefault(); doLogin(e.target); }
     if (e.target.id === 'settings-form') { e.preventDefault(); saveSettings(e.target); }
     if (e.target.id === 'health-form') { e.preventDefault(); saveHealthLink(e.target); }
+    if (e.target.id === 'weather-form') { e.preventDefault(); const i = e.target.querySelector('input'); if (i) i.blur(); saveWeatherPlace(e.target); }
   });
 
   document.addEventListener('visibilitychange', () => {

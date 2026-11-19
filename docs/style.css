@@ -421,3 +421,15 @@ button.cell { border: 2px solid transparent; min-height: 84px; }
 .early-ask { margin-top: 8px; padding: 8px 10px; background: var(--honey-soft); border-radius: 12px; font-size: 0.88rem; line-height: 1.45; }
 .early-ask .chips { margin-top: 6px; }
 .early-note { margin: 6px 0 8px; padding: 6px 10px; background: var(--blue-soft); border-radius: 12px; font-size: 0.85rem; line-height: 1.45; color: var(--ink-2); }
+/* 天気と気圧(記録の画面のいちばん上。押すと 3 時間ごとの値) */
+details.wx { background: var(--card); border-radius: var(--radius); box-shadow: var(--shadow); margin-bottom: 8px; font-size: 0.86rem; color: var(--ink-2); }
+details.wx summary { list-style: none; cursor: pointer; display: flex; flex-wrap: wrap; align-items: center; gap: 2px 12px; padding: 6px 12px; min-height: 40px; }
+details.wx summary::-webkit-details-marker { display: none; }
+details.wx summary::after { content: '▾'; margin-left: auto; color: var(--muted); }
+details.wx[open] summary::after { content: '▴'; }
+details.wx b { color: var(--ink); font-variant-numeric: tabular-nums; }
+.wx-main span { margin-right: 4px; }
+.wx-p small { color: var(--muted); margin-left: 2px; }
+.wx-more { padding: 0 12px 10px; line-height: 1.5; }
+.wx-hours { display: grid; grid-template-columns: repeat(auto-fill, minmax(7.6em, 1fr)); gap: 2px 10px; font-variant-numeric: tabular-nums; margin: 4px 0; }
+.wx-hours span { white-space: nowrap; }

@@ -39,6 +39,23 @@
   // カテゴリーごとの備考(記録の画面の並びと同じ)
   const NOTES = [['note_morning', '朝'], ['note_day', '日中'], ['note_meds', '薬'], ['note_alcohol', 'アルコール']];
   const setOf = (v) => new Set(String(v || '').split(',').filter(Boolean));
+  // 天気の種類(WMO の番号)→ [絵, ことば](アプリの app.js と同じ)
+  function wxLabel(c) {
+    if (c == null) return ['', ''];
+    if (c === 0) return ['☀️', '快晴'];
+    if (c === 1) return ['🌤️', '晴れ'];
+    if (c === 2) return ['⛅', '晴れ時々くもり'];
+    if (c === 3) return ['☁️', 'くもり'];
+    if (c === 45 || c === 48) return ['🌫️', '霧'];
+    if (c >= 51 && c <= 57) return ['🌦️', '霧雨'];
+    if (c >= 61 && c <= 67) return ['🌧️', c === 65 || c === 67 ? '強い雨' : '雨'];
+    if (c >= 71 && c <= 77) return ['🌨️', '雪'];
+    if (c >= 80 && c <= 82) return ['🌦️', 'にわか雨'];
+    if (c === 85 || c === 86) return ['🌨️', 'にわか雪'];
+    if (c >= 95) return ['⛈️', '雷雨'];
+    return ['', ''];
+  }
+  const signed = (v, dg) => (v == null ? '–' : (v > 0 ? '+' : v < 0 ? '−' : '±') + Math.abs(v).toFixed(dg));
 
   const page = document.getElementById('page');
   const params = new URLSearchParams(location.search);
@@ -69,8 +86,9 @@
     const days = [];
     const n = daysBetween(data.from, data.to) + 1;
     const idx = {};
-    for (let i = 0; i < n; i++) { const d = addDays(data.from, i); idx[d] = days.length; days.push({ date: d, o: null, health: null, memos: [] }); }
+    for (let i = 0; i < n; i++) { const d = addDays(data.from, i); idx[d] = days.length; days.push({ date: d, o: null, health: null, memos: [], w: null }); }
     data.obs.forEach((o) => { if (o.date in idx) days[idx[o.date]].o = o; });
+    (data.weather || []).forEach((w) => { if (w.date in idx) days[idx[w.date]].w = w; });
     data.health.forEach((h) => { if (h.date in idx) days[idx[h.date]].health = h; });
     data.memos.forEach((m) => { if (m.date in idx) days[idx[m.date]].memos.push(m); });
 
@@ -155,10 +173,17 @@
     const alcoholDays = days.filter((d) => d.o && d.o.alcohol === 1).length;
     const alcoholKnown = days.filter((d) => d.o && d.o.alcohol != null).length;
     const countSet = (key, list) => list.map(([k, l]) => `${l} ${days.filter((d) => d.o && setOf(d.o[key]).has(k)).length}日`).join(' / ');
+    // 天気と気圧(住まいの地域の気象データ)
+    const wDays = days.filter((d) => d.w && d.w.p_mean != null);
+    const wv = (k) => days.filter((d) => d.w && d.w[k] != null).map((d) => d.w[k]);
+    const pMeans = wv('p_mean');
+    const dropDays = days.filter((d) => d.w && d.w.p_diff != null && d.w.p_diff <= -5).length;
+    const wxText = wDays.length ? `気圧 平均 ${Math.round(avg(pMeans))}hPa <small>(日ごとの平均 ${Math.round(Math.min(...pMeans))}〜${Math.round(Math.max(...pMeans))})</small> / 前の日より 5hPa 以上下がった日 ${dropDays}日` +
+      `${wv('t_max').length ? ` / 気温 最高の平均 ${f1(avg(wv('t_max')))}℃・最低の平均 ${f1(avg(wv('t_min')))}℃` : ''} <small>(データ ${wDays.length}日)</small>` : '';
 
     const header = `<h1>からだの記録 ${jp(data.from)} 〜 ${jp(data.to)}</h1>
       <div class="meta">${s.patient_name ? `<span>氏名: ${esc(s.patient_name)}</span>` : ''}<span>期間: ${n}日(観察の記録 ${obsDays}日)</span><span>作成: ${jp(logicalToday())}</span></div>
-      <p class="src">記録の方法: 家族が見て分かることを毎日記録(本人には症状をたずねていません)+ Apple Watch / iPhone ヘルスケアの自動の値。</p>`;
+      <p class="src">記録の方法: 家族が見て分かることを毎日記録(本人には症状をたずねていません)+ Apple Watch / iPhone ヘルスケアの自動の値${wDays.length ? ' + 住まいの地域の天気・気圧(気象データ)' : ''}。</p>`;
     const note = s.report_note ? `<div class="note avoid"><b>家族から先生へ</b><p>${esc(s.report_note).replace(/\n/g, '<br>')}</p></div>` : '';
 
     const summary = `<h2>まとめ</h2><table class="summary avoid">
@@ -179,10 +204,20 @@
       <tr><th>アルコール</th><td>あり ${alcoholDays}日 <small>(記録 ${alcoholKnown}日中)</small></td></tr>
       <tr><th>本人が自分から訴えた日</th><td>${countSet('complaint', COMPLAINT)} <small>(こちらからはたずねていません)</small></td></tr>
       <tr><th>楽そうだった時間帯</th><td>${countSet('easy_times', EASY)}</td></tr>
+      ${wxText ? `<tr><th>天気・気圧(住まいの地域)</th><td>${wxText}<br><small>気象データ(Open-Meteo)。気圧は海面気圧の1日の平均。日ごとの値は「日ごとの推移」と「日別の一覧」</small></td></tr>` : ''}
     </table>`;
 
     const chart1 = lineChart(days, { label: '不随意運動の見た目(家族の評価)', note: '1 ほぼなし 〜 5 とても強い', get: (d) => (d.o && d.o.movement != null ? d.o.movement : null) },
       { min: 1, max: 5, ticks: [1, 2, 3, 4, 5], id: 'c1' });
+    // 気圧のグラフ(見た目のグラフのすぐ下に置き、日付をそろえて見比べられるようにする)
+    let chartP = '';
+    if (pMeans.length >= 2) {
+      const lo = Math.min(...pMeans), hi = Math.max(...pMeans);
+      const step = hi - lo > 25 ? 10 : 5;
+      const min = Math.floor((lo - 2) / step) * step, max = Math.ceil((hi + 2) / step) * step;
+      const ticks = []; for (let t = min; t <= max; t += step) ticks.push(t);
+      chartP = `<div class="avoid" style="margin-top:8px">${lineChart(days, { label: '気圧(1日の平均、hPa)', note: '住まいの地域の気象データ。上のグラフと日付がそろっています', get: (d) => (d.w && d.w.p_mean != null ? Math.round(d.w.p_mean) : null) }, { min, max, ticks, id: 'c7', plain: true })}</div>`;
+    }
     const sleepMax = Math.max(10, Math.ceil(Math.max(0, ...sleep.map((v) => v / 60)) / 2) * 2);
     const chart2 = barChart(days, { label: '睡眠時間(時間)', note: 'Apple Watch の睡眠データ(夜の眠り)', fmt: (v) => v.toFixed(1) + 'h', get: (d) => (d.health && d.health.sleep_min != null ? d.health.sleep_min / 60 : null) },
       { max: sleepMax, ticks: ticksFor(sleepMax), id: 'c2' });
@@ -227,7 +262,7 @@
     };
     const prnCell = (d) => { if (!d.o) return ''; const t = prnList(d.o).map(prnItem); return t.length ? `${t.length}<small>${t.map((p) => esc(p.name ? p.t + ' ' + p.name : p.t)).join('<br>')}</small>` : (d.o.prn ? d.o.prn : ''); };
     const table = `<table class="days"><thead><tr><th>日付</th><th>起床</th><th class="c">起上</th><th class="c">ふら</th><th class="c">横</th><th class="c">外出</th><th class="c">仕事等</th><th class="c">食事</th><th class="c">見た目</th>
-      ${MEDS.map(([, l]) => `<th class="c med">${esc(l)}</th>`).join('')}<th class="num">他の薬</th><th class="c med">アルコール</th><th class="num">睡眠</th><th class="num">目覚</th><th class="num">歩数</th></tr></thead><tbody>
+      ${MEDS.map(([, l]) => `<th class="c med">${esc(l)}</th>`).join('')}<th class="num">他の薬</th><th class="c med">アルコール</th><th class="num">睡眠</th><th class="num">目覚</th><th class="num">歩数</th>${wDays.length ? '<th class="c">天気</th><th class="num">気圧</th>' : ''}</tr></thead><tbody>
       ${days.map((d) => `<tr><td>${md(d.date)} <span style="color:var(--muted)">${DOW[dowOf(d.date)]}</span></td>
         <td>${d.o && d.o.wake_time ? d.o.wake_time : ''}</td>
         <td class="c">${cell('getup', d)}</td><td class="c">${cell('gait', d)}</td><td class="c">${cell('lying', d)}</td><td class="c">${cell('outing', d)}</td><td class="c">${d.o ? ACT_SYM.filter(([k]) => setOf(d.o.activity).has(k)).map((x) => x[1]).join('') : ''}</td><td class="c">${cell('meal', d)}${d.o && d.o.night_snack === 1 ? '<small>+間</small>' : ''}</td>
@@ -236,12 +271,14 @@
         <td class="num">${prnCell(d)}</td><td class="c">${d.o && d.o.alcohol === 1 ? 'あり' : ''}</td>
         <td class="num">${d.health && d.health.sleep_min != null ? (d.health.sleep_min / 60).toFixed(1) : ''}</td>
         <td class="num">${d.health && d.health.awakenings != null ? d.health.awakenings : ''}</td>
-        <td class="num">${d.health && d.health.steps != null ? Number(d.health.steps).toLocaleString() : ''}</td></tr>`).join('')}
+        <td class="num">${d.health && d.health.steps != null ? Number(d.health.steps).toLocaleString() : ''}</td>${wDays.length ? `
+        <td class="c">${d.w ? `${wxLabel(d.w.wcode)[0]}${d.w.t_max != null && d.w.t_min != null ? `<small>${Math.round(d.w.t_max)}/${Math.round(d.w.t_min)}℃</small>` : ''}` : ''}</td>
+        <td class="num">${d.w && d.w.p_mean != null ? `${Math.round(d.w.p_mean)}${d.w.p_diff != null ? `<small>${signed(Math.round(d.w.p_diff), 0).replace('±', '')}</small>` : ''}` : ''}</td>` : ''}</tr>`).join('')}
     </tbody></table>
-    <p class="leg">起上・ふら(ふらつき): ○ スムーズ/なし △ ゆっくり/少し × つらそう/目立つ ／ 横 = 横になっていた時間 ／ 外出: 外 外出できた 近 近所だけ – なし ／ 仕事等: 出 会社出勤 残 残業 習 習い事 バ バレエ ／ 食事: 多 よく食べた 普 ふつう 半 半分くらい 少 少し × ほぼ食べず(+間 = 寝る前の間食あり) ／ 見た目 = 不随意運動 1〜5 ／ 朝の薬: ● ${esc(mn)}全部 ◔ ${esc(mn)}一部 ◐ ${esc(mn)}以外 ／ 寝る前の薬: ● 飲んだ ◔ 一部 ○ 飲まなかった(空欄は記録なし。小さな数字は飲んだ時刻。早 = 体調などで早く休んだ日で、その夜の眠りは次の日の行) ／ 目覚 = 5分以上目が覚めた回数</p>`;
+    <p class="leg">起上・ふら(ふらつき): ○ スムーズ/なし △ ゆっくり/少し × つらそう/目立つ ／ 横 = 横になっていた時間 ／ 外出: 外 外出できた 近 近所だけ – なし ／ 仕事等: 出 会社出勤 残 残業 習 習い事 バ バレエ ／ 食事: 多 よく食べた 普 ふつう 半 半分くらい 少 少し × ほぼ食べず(+間 = 寝る前の間食あり) ／ 見た目 = 不随意運動 1〜5 ／ 朝の薬: ● ${esc(mn)}全部 ◔ ${esc(mn)}一部 ◐ ${esc(mn)}以外 ／ 寝る前の薬: ● 飲んだ ◔ 一部 ○ 飲まなかった(空欄は記録なし。小さな数字は飲んだ時刻。早 = 体調などで早く休んだ日で、その夜の眠りは次の日の行) ／ 目覚 = 5分以上目が覚めた回数${wDays.length ? ' ／ 天気: 小さな数字は最高/最低気温 ／ 気圧: 1日の平均 hPa(小さな数字は前の日との差)' : ''}</p>`;
 
     page.innerHTML = header + note + summary +
-      `<h2>日ごとの推移</h2><div class="avoid">${chart1}</div><div class="avoid" style="margin-top:8px">${chart2}</div><div class="avoid" style="margin-top:8px">${chart3}</div>${gaitCharts}` +
+      `<h2>日ごとの推移</h2><div class="avoid">${chart1}</div>${chartP}<div class="avoid" style="margin-top:8px">${chart2}</div><div class="avoid" style="margin-top:8px">${chart3}</div>${gaitCharts}` +
       (profiles ? `<h2>1日の中の変化(歩き方)</h2><p class="src">iPhone が測った時刻ごとの値を、期間全体で時間帯ごと(左)と、朝の薬(${esc(mn)})を飲んでからの時間ごと(右)に平均したもの。グラフの下の数字は測れた回数。iPhone をポケットに入れて歩いた時だけ測られるので、時間帯によって回数に差があります。</p>${profiles}` : '') +
       `<h2>見た目と本人のことば</h2><p class="src">「本人が自分から口にしたこと」(こちらからはたずねていません)と、その日の備考。</p>${list(complaintItems)}` +
       `<h2>楽そうだった時間・できたこと</h2>${list(goodItems)}` +
@@ -258,6 +295,10 @@
         return `平均 ${d.health[k]}${u}` + (sr.length >= 2 ? `(${Math.min(...vs)}〜${Math.max(...vs)}、${sr.length}回)` : '');
       }]]));
     profileIds.forEach(([id, bins, fmt, u]) => attachBinTooltip(id, bins, fmt, u));
+    attachTooltip('c7', days, [
+      ['気圧', (d) => (d.w && d.w.p_mean != null ? `平均 ${d.w.p_mean}hPa(前日より ${signed(d.w.p_diff, 1)})` : '–')],
+      ['下がった幅', (d) => (d.w && d.w.p_drop != null ? `その日の中で ${d.w.p_drop}hPa` : '–')],
+      ['天気', (d) => (d.w ? `${wxLabel(d.w.wcode)[1] || '–'}${d.w.t_max != null ? ` ${Math.round(d.w.t_min)}〜${Math.round(d.w.t_max)}℃` : ''}` : '–')]]);
   }
 
   /* ---------- グラフ(SVG)。どれも 1 系列なので凡例の箱は置かず、見出しで名前を示す ---------- */
@@ -287,7 +328,7 @@
     return out;
   }
   function grid(opt) {
-    return opt.ticks.map((t) => `<line x1="${PL}" x2="${W - PR}" y1="${yOf(t, opt)}" y2="${yOf(t, opt)}" stroke="${t === (opt.min || 0) ? 'var(--axis)' : 'var(--grid)'}" stroke-width="1"/><text x="${PL - 6}" y="${yOf(t, opt) + 3}" font-size="9" text-anchor="end" fill="var(--muted)">${tickLabel(t)}</text>`).join('');
+    return opt.ticks.map((t) => `<line x1="${PL}" x2="${W - PR}" y1="${yOf(t, opt)}" y2="${yOf(t, opt)}" stroke="${t === (opt.min || 0) ? 'var(--axis)' : 'var(--grid)'}" stroke-width="1"/><text x="${PL - 6}" y="${yOf(t, opt) + 3}" font-size="9" text-anchor="end" fill="var(--muted)">${opt.plain ? String(t) : tickLabel(t)}</text>`).join('');
   }
   const title = (srs) => `<div class="legend"><span class="key"><b>${srs.label}</b></span><span style="margin-left:auto;color:var(--muted)">${srs.note || ''}</span></div>`;
   function lineChart(days, srs, opt) {

@@ -273,7 +273,7 @@ function toCell(v) {
  * 日付は「論理日」(午前4時区切り)の "YYYY-MM-DD" 文字列。時刻は "HH:MM"。
  * ===================================================================== */
 var Core = (function () {
-  var VERSION = 13;
+  var VERSION = 14;
   var IMAGE_PARTS = 10;       // 1 枚の画像を最大 10 個のセルに分けて入れる
   var IMAGE_CHUNK = 40000;    // 1 セルに入れる文字数(セルの上限は 50,000 文字)
   var IMAGE_META_COLS = 7;    // 画像の表の、データ以外の列の数
@@ -297,6 +297,10 @@ var Core = (function () {
                    'steps', 'steadiness', 'resting_hr', 'hrv', 'move_score', 'source', 'updated_at', 'nap_min', 'walking_speed',
                    'walk_asym', 'double_support', 'step_length', 'metric_series'],
     memo:         ['id', 'date', 'ts', 'text', 'deleted', 'created_at'],
+    // 天気と気圧(1 日 1 行、0 時区切りのその日)。記録する人のアプリが天気のサービス(Open-Meteo)から取って送る。
+    // p_ = 海面気圧 hPa(平均・最低・最高・その日の中で下がった幅)、t_ = 気温 ℃、humidity = 湿度 %、precip = 降水量 mm、
+    // wcode = 天気の種類(WMO の番号)、hourly = 1 時間ごとの { p: [...], t: [...] }、final = 1 ならその日の分がそろった
+    weather:      ['date', 'place', 'p_mean', 'p_min', 'p_max', 'p_drop', 't_max', 't_min', 't_mean', 'humidity', 'precip', 'wcode', 'hourly', 'final', 'updated_at'],
     reaction:     ['id', 'date', 'from_name', 'type', 'message', 'seen', 'created_at', 'label', 'image'],
     settings:     ['key', 'value'],
     image:        imageCols
@@ -322,7 +326,8 @@ var Core = (function () {
     health_last: '',
     health_try_at: '',                     // 同意の前に届いた(保存しなかった)試しの送信
     health_try: '',
-    image_config: ''                       // サイトで選んだ画像とリアクションの種類(JSON)
+    image_config: '',                      // サイトで選んだ画像とリアクションの種類(JSON)
+    weather_place: ''                      // 天気と気圧を調べる場所 "緯度,経度"(小数 2 桁 = 約 1km の粗さ)。空なら調べない
   };
   // saveSettings では変えられない設定(それぞれ専用の操作でだけ変わる)
   var PROTECTED_SETTINGS = { health_consent: 1, health_consent_at: 1, health_consent_by: 1, health_last_at: 1, health_last: 1,
@@ -431,6 +436,15 @@ var Core = (function () {
     return { id: toStr(r.id), name: toStr(r.name), mime: toStr(r.mime), w: toInt(r.w), h: toInt(r.h),
       created_at: toStr(r.created_at), deleted: truthy(r.deleted) ? 1 : 0 };
   }
+  function normWeather(r) {
+    var hourly = null;
+    if (!isBlank(r.hourly)) { try { var o = JSON.parse(String(r.hourly)); if (o && typeof o === 'object' && !Array.isArray(o)) hourly = o; } catch (e) { hourly = null; } }
+    return {
+      date: toStr(r.date), place: toStr(r.place), p_mean: toNum(r.p_mean), p_min: toNum(r.p_min), p_max: toNum(r.p_max), p_drop: toNum(r.p_drop),
+      t_max: toNum(r.t_max), t_min: toNum(r.t_min), t_mean: toNum(r.t_mean), humidity: toNum(r.humidity), precip: toNum(r.precip), wcode: toInt(r.wcode),
+      hourly: hourly, final: truthy(r.final) ? 1 : 0, updated_at: toStr(r.updated_at)
+    };
+  }
 
   // ---------- データ取得ヘルパー ----------
   function getSettings(store) {
@@ -468,6 +482,37 @@ var Core = (function () {
   function memosBetween(store, from, to) {
     return store.all('memo').map(normMemo).filter(function (r) { return !r.deleted && r.date >= from && r.date <= to; })
       .sort(function (a, b) { return a.ts < b.ts ? -1 : 1; });
+  }
+  // 天気と気圧。いまの場所の分だけ。p_diff = 前の日の平均気圧との差(前の日の分があれば)
+  function weatherBetween(store, from, to, place) {
+    if (!place) return [];
+    var by = {};
+    store.all('weather').map(normWeather).forEach(function (w) { if (w.place === place && isDateStr(w.date)) by[w.date] = w; });
+    return Object.keys(by).sort().filter(function (d) { return d >= from && d <= to; }).map(function (d) {
+      var w = by[d], prev = by[addDays(d, -1)];
+      w.p_diff = prev && prev.p_mean !== null && w.p_mean !== null ? Math.round((w.p_mean - prev.p_mean) * 10) / 10 : null;
+      delete w.place;
+      return w;
+    });
+  }
+  // 天気を取りに行く必要がある、いちばん古い日('' = いらない)。記録の開始日の前の日(前日比のため)からきょうまで、
+  // まだ無い日・場所が変わった日・その日の分がそろっていない日。きょうの分は 1 時間たったら取り直す
+  var WEATHER_BACK = 90; // 天気のサービスが返せるのは、だいたい 3 か月前まで
+  function weatherNeed(store, s, env) {
+    if (!s.weather_place) return '';
+    var today = env.today();
+    var sd = startDate(s);
+    var from = sd ? addDays(sd, -1) : addDays(today, -28);
+    if (from < addDays(today, -WEATHER_BACK)) from = addDays(today, -WEATHER_BACK);
+    var by = {};
+    store.all('weather').map(normWeather).forEach(function (w) { by[w.date] = w; });
+    var now = Date.parse(env.now());
+    for (var d = from; d <= today; d = addDays(d, 1)) {
+      var w = by[d];
+      if (!w || w.place !== s.weather_place) return d;
+      if (!w.final && (d < today || isNaN(Date.parse(w.updated_at)) || now - Date.parse(w.updated_at) > 3600000)) return d;
+    }
+    return '';
   }
   function imageMeta(store) {
     var rows = store.head ? store.head('image', IMAGE_META_COLS) : store.all('image');
@@ -856,6 +901,8 @@ var Core = (function () {
       obs: findOne(all, 'date', date),
       health: findOne(healthBetween(store, date, date), 'date', date),
       memos: memosBetween(store, date, date),
+      weather: weatherBetween(store, date, date, s.weather_place)[0] || null,
+      weather_need: weatherNeed(store, s, env),
       sent: sent,
       progress: { since: since, recorded: recorded, days: daysBetween(since, date) + 1 },
       settings: s, images: imageMeta(store)
@@ -1105,6 +1152,7 @@ var Core = (function () {
       }
       s.health_shortcut_url = u;
     }
+    if ('weather_place' in s) s.weather_place = placeOf(s.weather_place);
     for (var k in s) {
       if (!(k in DEFAULT_SETTINGS) || PROTECTED_SETTINGS[k]) continue;
       setSetting(store, k, toStr(s[k]).slice(0, 2000));
@@ -1122,8 +1170,67 @@ var Core = (function () {
     return {
       ok: true, from: from, to: to,
       obs: obsBetween(store, from, to), health: healthBetween(store, from, to), memos: memosBetween(store, from, to),
+      weather: weatherBetween(store, from, to, getSettings(store).weather_place),
       settings: getSettings(store)
     };
+  };
+
+  // ---------- 天気と気圧 ----------
+  // 場所 "35.68,139.77" を小数 2 桁(約 1km)にそろえる。空は空のまま(調べない)
+  function placeOf(v) {
+    var t = toStr(v).replace(/[０-９．，－]/g, function (c) { return String.fromCharCode(c.charCodeAt(0) - 0xFEE0); }).replace(/[、\s]+/g, ',').replace(/^,+|,+$/g, '');
+    if (!t) return '';
+    var m = /^(-?\d{1,2}(?:\.\d+)?),+(-?\d{1,3}(?:\.\d+)?)$/.exec(t);
+    var lat = m ? parseFloat(m[1]) : NaN, lon = m ? parseFloat(m[2]) : NaN;
+    if (!m || Math.abs(lat) > 90 || Math.abs(lon) > 180) throw fail('bad_request', '場所は「緯度,経度」の数字で入れてください(例: 35.68,139.77)');
+    return lat.toFixed(2) + ',' + lon.toFixed(2);
+  }
+  function round1(v) { return Math.round(v * 10) / 10; }
+  // 1 時間ごとの値(24 個まで)。数字でないものは null
+  function hourList(a) {
+    return (Array.isArray(a) ? a.slice(0, 24) : []).map(function (v) { return typeof v === 'number' && isFinite(v) ? round1(v) : null; });
+  }
+  function numsOf(a) { return a.filter(function (v) { return v !== null; }); }
+  function meanOf(a) { return a.length ? a.reduce(function (x, y) { return x + y; }, 0) / a.length : null; }
+  function numOrNull(v) { return typeof v === 'number' && isFinite(v) ? v : null; }
+
+  // 記録する人のアプリが取ってきた天気を、日ごとにまとめて入れる。
+  // days: [{ date, p: [1 時間ごとの気圧], t: [気温], h: [湿度], t_max, t_min, precip, wcode, final }]
+  actions.saveWeather = function (req, store, env, device) {
+    var s = getSettings(store);
+    if (!s.weather_place) throw fail('bad_request', '天気を調べる場所が設定されていません');
+    if (toStr(req.place) !== s.weather_place) throw fail('place_changed', '天気を調べる場所が変わりました。もう一度読み込みます');
+    var today = env.today();
+    var oldest = addDays(today, -(WEATHER_BACK + 30));
+    var rows = store.all('weather').map(normWeather);
+    var saved = [], seen = {};
+    (Array.isArray(req.days) ? req.days.slice(0, WEATHER_BACK + 31) : []).forEach(function (d) {
+      if (!d || !isDateStr(d.date) || seen[d.date] || d.date < oldest || d.date > addDays(today, 1)) return;
+      seen[d.date] = true;
+      var p = hourList(d.p), t = hourList(d.t), h = hourList(d.h);
+      var pv = numsOf(p), tv = numsOf(t), hv = numsOf(h);
+      if (pv.length < 18) return; // 1 日の大半がそろっていない日は入れない
+      // その日の中で下がった幅: それまでのいちばん高い気圧から、どれだけ下がったかの最大
+      var top = -Infinity, drop = 0;
+      pv.forEach(function (v) { if (v > top) top = v; if (top - v > drop) drop = top - v; });
+      var tMax = numOrNull(d.t_max), tMin = numOrNull(d.t_min);
+      var row = {
+        date: d.date, place: s.weather_place,
+        p_mean: round1(meanOf(pv)), p_min: Math.min.apply(null, pv), p_max: Math.max.apply(null, pv), p_drop: round1(drop),
+        t_max: tMax !== null ? round1(tMax) : tv.length ? Math.max.apply(null, tv) : null,
+        t_min: tMin !== null ? round1(tMin) : tv.length ? Math.min.apply(null, tv) : null,
+        t_mean: tv.length ? round1(meanOf(tv)) : null, humidity: hv.length ? Math.round(meanOf(hv)) : null,
+        precip: numOrNull(d.precip) !== null ? round1(d.precip) : null,
+        wcode: numOrNull(d.wcode) !== null && d.wcode >= 0 && d.wcode < 100 ? Math.round(d.wcode) : null,
+        hourly: JSON.stringify({ p: p, t: t }),
+        final: truthy(d.final) && d.date <= today ? 1 : 0, updated_at: env.now()
+      };
+      var ex = findOne(rows, 'date', d.date);
+      if (ex && ex.final && ex.place === s.weather_place) return; // そろった日は書き直さない
+      if (ex) store.update('weather', 'date', d.date, row); else store.insert('weather', row);
+      saved.push(d.date);
+    });
+    return { ok: true, dates: saved };
   };
 
   actions.createKey = function (req, store, env, device) {
@@ -1196,7 +1303,7 @@ var Core = (function () {
   var ALLOW = {
     patient:   ['me', 'room', 'seenReactions', 'consentHealth', 'getImage'],
     supporter: ['me', 'state', 'saveObs', 'addMemo', 'updateMemo', 'deleteMemo', 'react', 'reactions', 'getSettings', 'saveSettings', 'report',
-                'createKey', 'consentHealth', 'getImage', 'uploadImage', 'deleteImage', 'saveImageConfig'],
+                'createKey', 'consentHealth', 'getImage', 'uploadImage', 'deleteImage', 'saveImageConfig', 'saveWeather'],
     health:    ['health', 'need']
   };
 
