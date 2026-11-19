@@ -7,7 +7,7 @@
   'use strict';
 
   /* ========== 保存(localStorage) ========== */
-  const KEYS = { cfg: 'kuma.cfg', state: 'kuma.state3', queue: 'kuma.queue', idmap: 'kuma.idmap', thanked: 'kuma.thanked', look: 'kuma.look', prnNames: 'kuma.prnNames', wx: 'kuma.wxAt' };
+  const KEYS = { cfg: 'kuma.cfg', state: 'kuma.state3', queue: 'kuma.queue', idmap: 'kuma.idmap', thanked: 'kuma.thanked', look: 'kuma.look', prnNames: 'kuma.prnNames', wx: 'kuma.wxAt', wxNext: 'kuma.wxNext' };
   function load(k, def) { try { const v = localStorage.getItem(k); return v === null ? def : JSON.parse(v); } catch (e) { return def; } }
   function save(k, v) { try { localStorage.setItem(k, JSON.stringify(v)); } catch (e) { /* 保存できない環境でも動かす */ } }
 
@@ -403,30 +403,35 @@
   const WX_GEO = 'https://geocoding-api.open-meteo.com/v1/search';
   const WX_BACK = 90; // 天気のサービスが返せるのは、だいたい 3 か月前まで
   let wxBusy = false, wxAnnounce = false;
+  // from〜to の日ごとの値(1 時間ごとの気圧・気温・湿度と、その日の天気)。final = その日が終わっている(0 時区切り)
+  async function wxFetch(place, from, to) {
+    const [lat, lon] = place.split(',');
+    const today = fmtDate(new Date());
+    const q = `latitude=${encodeURIComponent(lat)}&longitude=${encodeURIComponent(lon)}&hourly=pressure_msl,temperature_2m,relative_humidity_2m` +
+      `&daily=weather_code,temperature_2m_max,temperature_2m_min,precipitation_sum&timezone=Asia%2FTokyo&start_date=${from}&end_date=${to}`;
+    const j = await (await fetch(`${WX_API}?${q}`)).json();
+    const H = j && j.hourly, D = j && j.daily;
+    if (!H || !D || !Array.isArray(H.time) || !Array.isArray(D.time)) throw new Error((j && j.reason) || 'weather');
+    const byDay = {};
+    H.time.forEach((t, k) => { (byDay[String(t).slice(0, 10)] = byDay[String(t).slice(0, 10)] || []).push(k); });
+    return D.time.map((d, i) => {
+      const pick = (arr) => (byDay[d] || []).map((k) => (arr ? arr[k] : null));
+      const at = (arr) => (arr ? arr[i] : null);
+      return { date: d, p: pick(H.pressure_msl), t: pick(H.temperature_2m), h: pick(H.relative_humidity_2m),
+        t_max: at(D.temperature_2m_max), t_min: at(D.temperature_2m_min), precip: at(D.precipitation_sum), wcode: at(D.weather_code), final: d < today ? 1 : 0 };
+    });
+  }
   async function syncWeather(data) {
     const s = (data && data.settings) || {};
     if (cfg.role !== 'supporter' || wxBusy || !data.weather_need || !s.weather_place) return;
     if (Date.now() - (Number(load(KEYS.wx, 0)) || 0) < 15 * 60e3) return; // 取りに行くのは 15 分に 1 回まで
     wxBusy = true; save(KEYS.wx, Date.now());
-    const [lat, lon] = s.weather_place.split(',');
     const today = fmtDate(new Date()); // 天気は 0 時区切りの日
     let from = data.weather_need;
     if (from < addDays(today, -WX_BACK)) from = addDays(today, -WX_BACK);
     let saved = -1;
     try {
-      const q = `latitude=${encodeURIComponent(lat)}&longitude=${encodeURIComponent(lon)}&hourly=pressure_msl,temperature_2m,relative_humidity_2m` +
-        `&daily=weather_code,temperature_2m_max,temperature_2m_min,precipitation_sum&timezone=Asia%2FTokyo&start_date=${from}&end_date=${today}`;
-      const j = await (await fetch(`${WX_API}?${q}`)).json();
-      const H = j && j.hourly, D = j && j.daily;
-      if (!H || !D || !Array.isArray(H.time) || !Array.isArray(D.time)) throw new Error((j && j.reason) || 'weather');
-      const byDay = {};
-      H.time.forEach((t, k) => { (byDay[String(t).slice(0, 10)] = byDay[String(t).slice(0, 10)] || []).push(k); });
-      const days = D.time.map((d, i) => {
-        const pick = (arr) => (byDay[d] || []).map((k) => (arr ? arr[k] : null));
-        const at = (arr) => (arr ? arr[i] : null);
-        return { date: d, p: pick(H.pressure_msl), t: pick(H.temperature_2m), h: pick(H.relative_humidity_2m),
-          t_max: at(D.temperature_2m_max), t_min: at(D.temperature_2m_min), precip: at(D.precipitation_sum), wcode: at(D.weather_code), final: d < today ? 1 : 0 };
-      });
+      const days = await wxFetch(s.weather_place, from, today);
       const r = await call({ action: 'saveWeather', place: s.weather_place, days });
       if (r.ok) saved = r.dates.length;
       else if (r.error === 'place_changed') save(KEYS.wx, 0);
@@ -466,6 +471,60 @@
       <div class="wx-more">${w.p_drop != null ? `<p>1日の中で下がった幅: <b>${w.p_drop.toFixed(1)}</b> hPa${w.precip ? ` ・ 雨 ${w.precip} mm` : ''}${w.humidity != null ? ` ・ 湿度 ${w.humidity}%` : ''}</p>` : ''}
         ${hours.length ? `<div class="wx-hours">${hours.join('')}</div>` : ''}
         <p class="help">住まいの地域の気象データ(Open-Meteo)。気圧は海面気圧の1日の平均${isToday && !w.final ? '。きょうの分は、この先の時間の予報を含みます' : ''}。</p></div></details>`;
+  }
+  /* ---- あしたの気圧の予報(記録する人の画面だけ。保存はせず、この端末に 1 時間だけ覚えておく) ---- */
+  const WX_BIG = 5; // 「大きく下がる見込み」の目安(hPa)。レポートの「前の日より 5hPa 以上下がった日」と同じ
+  let wxNextBusy = false;
+  // 1 日分の気圧のまとめ: 平均・いちばん低い時刻・その日の中で下がる幅(それまでの最高から)
+  function wxSum(d) {
+    const ps = (d.p || []).map((v, h) => [h, v]).filter(([, v]) => typeof v === 'number');
+    if (ps.length < 18) return null;
+    let top = -Infinity, drop = 0, low = ps[0];
+    ps.forEach((x) => { if (x[1] > top) top = x[1]; if (top - x[1] > drop) drop = top - x[1]; if (x[1] < low[1]) low = x; });
+    return { p_mean: ps.reduce((a, x) => a + x[1], 0) / ps.length, p_drop: drop, low_h: low[0], low_p: low[1] };
+  }
+  // date(あした)の予報。古い(1 時間より前)か無ければ取りに行き、取れたら描き直す
+  function wxNext(place, date) {
+    const c = load(KEYS.wxNext, null);
+    const hit = c && c.place === place && c.date === date ? c : null;
+    if ((!hit || Date.now() - hit.at > 60 * 60e3) && !wxNextBusy && navigator.onLine !== false) {
+      wxNextBusy = true;
+      wxFetch(place, addDays(date, -1), date).then((days) => {
+        const d0 = days.find((x) => x.date === addDays(date, -1)), d1 = days.find((x) => x.date === date);
+        const s0 = d0 && wxSum(d0), s1 = d1 && wxSum(d1);
+        if (!s1) throw new Error('no forecast');
+        save(KEYS.wxNext, { place, date, at: Date.now(), today_mean: s0 ? s0.p_mean : null, next: Object.assign({}, d1, s1) });
+        wxNextBusy = false;
+        if (tab === 'today') scheduleRender();
+      }).catch(() => {
+        // 取れなかった時は 10 分後にもう一度
+        save(KEYS.wxNext, Object.assign({}, hit || { place, date }, { at: Date.now() - 50 * 60e3 }));
+        wxNextBusy = false;
+      });
+    }
+    return hit && hit.next ? hit : null;
+  }
+  // 記録の画面(きょう)の天気の下に出す、あしたの予報
+  function forecastLine(s, date, todayW) {
+    if (!s.weather_place) return '';
+    const next = addDays(date, 1);
+    const f = wxNext(s.weather_place, next);
+    if (!f) return '';
+    const n = f.next;
+    const base = todayW && todayW.p_mean != null ? todayW.p_mean : f.today_mean;
+    const diff = base != null ? Math.round((n.p_mean - base) * 10) / 10 : null;
+    const big = (diff != null && diff <= -WX_BIG) || n.p_drop >= WX_BIG;
+    const [ico, label] = wxLabel(n.wcode);
+    const temp = n.t_max != null && n.t_min != null ? `${Math.round(n.t_min)}〜${Math.round(n.t_max)}℃` : '';
+    const hours = [];
+    for (let h = 0; h < (n.p || []).length; h += 3) if (n.p[h] != null) hours.push(`<span>${h}時 <b>${Math.round(n.p[h])}</b>${n.t && n.t[h] != null ? ` ${Math.round(n.t[h])}℃` : ''}</span>`);
+    return `<details class="wx next${big ? ' big' : ''}"><summary><span class="wx-when">あした ${jpShort(next)}(${DOW[dowOf(next)]})の予報</span>
+        <span class="wx-main">${ico ? `<span aria-hidden="true">${ico}</span>` : ''}${esc(label)}${temp ? ` ${temp}` : ''}</span>
+        <span class="wx-p">気圧 <b>${Math.round(n.p_mean)}</b> hPa${diff != null ? `<small>(きょうより ${signed(diff, 1)})</small>` : ''}</span>
+        ${big ? '<span class="wx-badge">⤵ 気圧が大きく下がる見込み</span>' : ''}</summary>
+      <div class="wx-more"><p>その日の中で下がる幅: <b>${n.p_drop.toFixed(1)}</b> hPa ・ いちばん低いのは <b>${n.low_h}時ごろ</b>(${Math.round(n.low_p)} hPa)${n.precip ? ` ・ 雨 ${n.precip} mm` : ''}</p>
+        ${hours.length ? `<div class="wx-hours">${hours.join('')}</div>` : ''}
+        <p class="help">予報なので変わることがあります(${fmtStamp(new Date(f.at).toISOString(), true)} に取得)。⤵ は、きょうより ${WX_BIG}hPa 以上低いか、あしたの中で ${WX_BIG}hPa 以上下がる見込みの時。本人には伝えずに、予定を軽くする目安にしてください。</p></div></details>`;
   }
   // 設定の「天気を調べる場所」を保存する。数字(緯度,経度)か、市の名前(天気のサービスで探す)
   async function saveWeatherPlace(form) {
@@ -703,7 +762,7 @@
       alcohol: () => card('アルコール', scaleField('alcohol', o, '', true) + noteField(o, 'note_alcohol', '例: 夕食でビール1杯')),
       memo: () => memoCard(data, curDate)
     };
-    return nav + progress + weatherLine(data.weather, isToday) + cardOrder(s).map((k) => cards[k]()).join('') +
+    return nav + progress + weatherLine(data.weather, isToday) + (isToday ? forecastLine(s, curDate, data.weather) : '') + cardOrder(s).map((k) => cards[k]()).join('') +
       `<p class="help center" style="margin:2px 0 12px">押した内容はその場で保存されます。</p>`;
   }
 
