@@ -273,7 +273,7 @@ function toCell(v) {
  * 日付は「論理日」(午前4時区切り)の "YYYY-MM-DD" 文字列。時刻は "HH:MM"。
  * ===================================================================== */
 var Core = (function () {
-  var VERSION = 15;
+  var VERSION = 17;
   var IMAGE_PARTS = 10;       // 1 枚の画像を最大 10 個のセルに分けて入れる
   var IMAGE_CHUNK = 40000;    // 1 セルに入れる文字数(セルの上限は 50,000 文字)
   var IMAGE_META_COLS = 7;    // 画像の表の、データ以外の列の数
@@ -295,7 +295,9 @@ var Core = (function () {
                    // v5: 仕事・習い事(会社出勤、残業、習い事、バレエ)
                    'activity',
                    // v12: 早く休んだ日(寝る前の薬が 18 時より前で、記録する人が「合っている」と確かめた日 = 1)
-                   'early_bed'],
+                   'early_bed',
+                   // v19: 夜のようす(布団に入った時刻、寝るまでのようす、お風呂、夜の備考、寝つき)
+                   'bed_time', 'evening', 'bath', 'note_night', 'sleep_onset'],
     // iPhone / Apple Watch から自動で届く値(1 日 1 行)。列は右に足していく(前の版のシートとそろえるため)
     health_daily: ['date', 'sleep_min', 'inbed_min', 'awakenings', 'deep_min', 'rem_min', 'bed_start', 'bed_end',
                    'steps', 'steadiness', 'resting_hr', 'hrv', 'move_score', 'source', 'updated_at', 'nap_min', 'walking_speed',
@@ -346,11 +348,16 @@ var Core = (function () {
   var PATIENT_SETTINGS = ['patient_name', 'supporter_name','health_shortcut_url', 'health_shortcut_name', 'health_consent', 'health_consent_at', 'health_last_at', 'image_config'];
 
   // 観察の項目。数字の範囲は [最小, 最大]
-  var OBS_SCALES = { getup: [0, 2], gait: [0, 2], lying: [0, 3], outing: [0, 2], meal: [0, 4], movement: [1, 5], alcohol: [0, 1], night_snack: [0, 1], early_bed: [0, 1] };
+  // evening = 寝るまでのようす(0 おだやか / 1 少しつらそう / 2 つらそう)、bath = お風呂(0 入らなかった / 1 シャワー / 2 湯ぶね)、
+  // sleep_onset = 寝つき(0 すぐ眠れた / 1 少し時間がかかった / 2 なかなか眠れなかった。見ていて分かった日だけ)
+  var OBS_SCALES = { getup: [0, 2], gait: [0, 2], lying: [0, 3], outing: [0, 2], meal: [0, 4], movement: [1, 5], alcohol: [0, 1], night_snack: [0, 1], early_bed: [0, 1],
+    evening: [0, 2], bath: [0, 2], sleep_onset: [0, 2] };
   var OBS_SETS = { easy_times: ['morning', 'noon', 'evening', 'night'], complaint: ['pain', 'dizzy', 'other'],
     activity: ['work', 'overtime', 'lesson', 'ballet'] };
   // 備考: good_note = 楽そうだった時間・できたこと、complaint_note = 見た目と本人のことば、ほかはカテゴリーの名前どおり
-  var OBS_TEXTS = { good_note: 500, complaint_note: 500, note_morning: 500, note_day: 500, note_meds: 500, note_alcohol: 500 };
+  var OBS_TEXTS = { good_note: 500, complaint_note: 500, note_morning: 500, note_day: 500, note_night: 500, note_meds: 500, note_alcohol: 500 };
+  // 時刻の項目: wake_time = 起きてきた時刻、bed_time = 布団に入った時刻(深夜 0〜3 時台は、その日の夜の続き)
+  var OBS_TIMES = { wake_time: '起きてきた時刻', bed_time: '布団に入った時刻' };
   var MED_FIELDS = ['med_morning', 'med_extra', 'med_night'];
   // 薬: 朝は "all" (分けて書く薬も)全部 / "part" 一部 / "noc" その薬以外を飲んだ。夜は "yes" 飲んだ / "part" 一部 / "no" 飲まなかった。
   // 時刻は "all 08:10" のように後ろに付ける(v3 の朝の "yes" も読めるように残す)
@@ -407,7 +414,7 @@ var Core = (function () {
 
   // ---------- レコードの型を整える ----------
   function normObs(r) {
-    var o = { date: toStr(r.date), wake_time: toStr(r.wake_time) };
+    var o = { date: toStr(r.date), wake_time: toStr(r.wake_time), bed_time: toStr(r.bed_time) };
     for (var k in OBS_SCALES) o[k] = toInt(r[k]);
     MED_FIELDS.forEach(function (f) { o[f] = toStr(r[f]); });
     o.prn = toInt(r.prn);
@@ -419,7 +426,7 @@ var Core = (function () {
     return o;
   }
   function hasObs(o) {
-    if (o.wake_time || o.complaint || o.easy_times || o.activity || o.prn_times || o.prn !== null) return true;
+    if (o.wake_time || o.bed_time || o.complaint || o.easy_times || o.activity || o.prn_times || o.prn !== null) return true;
     for (var t in OBS_TEXTS) if (o[t]) return true;
     for (var k in OBS_SCALES) if (o[k] !== null) return true;
     for (var i = 0; i < MED_FIELDS.length; i++) if (o[MED_FIELDS[i]]) return true;
@@ -995,10 +1002,11 @@ var Core = (function () {
     var row = existing ? existing : normObs({ date: req.date });
     var changed = false;
     function set(k, v) { if (row[k] !== v) { row[k] = v; changed = true; } }
-    if ('wake_time' in req) {
-      var w = toStr(req.wake_time).trim();
-      if (w && !isHm(w)) throw fail('bad_request', '起きてきた時刻は 07:30 の形です');
-      set('wake_time', w);
+    for (var tk in OBS_TIMES) {
+      if (!(tk in req)) continue;
+      var w = toStr(req[tk]).trim();
+      if (w && !isHm(w)) throw fail('bad_request', OBS_TIMES[tk] + 'は 07:30 の形です');
+      set(tk, w);
     }
     for (var k in OBS_SCALES) {
       if (!(k in req)) continue;
