@@ -462,3 +462,6 @@ ul.strive-weeks { list-style: none; margin: 0 0 10px; padding: 0; display: grid;
 .thanks-preview { margin-top: 4px; }
 .thanks-preview .bubble { margin-top: 4px; }
 .thanks-preview .bubble::before { display: none; }
+/* 起きた時刻・布団に入った時刻を入れていない日の代わり(iPhone の睡眠の時刻) */
+table.grid .auto { color: var(--muted); font-style: italic; }
+.help.auto-hint b { color: var(--ink-2); }

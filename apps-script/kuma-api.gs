@@ -273,7 +273,7 @@ function toCell(v) {
  * 日付は「論理日」(午前4時区切り)の "YYYY-MM-DD" 文字列。時刻は "HH:MM"。
  * ===================================================================== */
 var Core = (function () {
-  var VERSION = 17;
+  var VERSION = 18;
   var IMAGE_PARTS = 10;       // 1 枚の画像を最大 10 個のセルに分けて入れる
   var IMAGE_CHUNK = 40000;    // 1 セルに入れる文字数(セルの上限は 50,000 文字)
   var IMAGE_META_COLS = 7;    // 画像の表の、データ以外の列の数
@@ -495,6 +495,20 @@ var Core = (function () {
   }
   function healthBetween(store, from, to) {
     return store.all('health_daily').map(normHealth).filter(function (r) { return r.date >= from && r.date <= to; });
+  }
+  // 起きてきた時刻・布団に入った時刻を入れていない日に、代わりに使う iPhone の睡眠の時刻。
+  // wake = その日の朝の眠りの終わり(その日の分の bed_end)、bed = その日の夜の眠り始め(次の日の分の bed_start)
+  function sleepTimes(store, from, to) {
+    var by = {};
+    healthBetween(store, from, addDays(to, 1)).forEach(function (h) { by[h.date] = h; });
+    var out = {};
+    for (var d = from; d <= to; d = addDays(d, 1)) {
+      var w = by[d] && isHm(by[d].bed_end) ? by[d].bed_end : '';
+      var nx = by[addDays(d, 1)];
+      var b = nx && isHm(nx.bed_start) ? nx.bed_start : '';
+      if (w || b) out[d] = { wake: w, bed: b };
+    }
+    return out;
   }
   function memosBetween(store, from, to) {
     return store.all('memo').map(normMemo).filter(function (r) { return !r.deleted && r.date >= from && r.date <= to; })
@@ -983,6 +997,7 @@ var Core = (function () {
       recent_memos: recentMemos(store, date, sd),
       obs: findOne(all, 'date', date),
       health: findOne(healthBetween(store, date, date), 'date', date),
+      sleep_times: sleepTimes(store, date, date)[date] || null,
       memos: memosBetween(store, date, date),
       weather: weatherBetween(store, date, date, s.weather_place)[0] || null,
       weather_need: weatherNeed(store, s, env),
@@ -1262,6 +1277,7 @@ var Core = (function () {
     return {
       ok: true, from: from, to: to,
       obs: obsBetween(store, from, to), health: healthBetween(store, from, to), memos: memosBetween(store, from, to),
+      sleep_times: sleepTimes(store, from, to),
       weather: weatherBetween(store, from, to, getSettings(store).weather_place),
       settings: getSettings(store)
     };

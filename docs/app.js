@@ -774,14 +774,18 @@
         : pr.since === startDate(s) ? `記録の開始日(${jpShort(pr.since)})から` : `${jpShort(pr.since)}から`;
       progress = `<p class="progress-line small">${fromLabel} 記録 <b>${pr.recorded}日</b> / ${pr.days}日${left != null ? `<br>次の診察まで <b>${left >= 0 ? left + '日' : '過ぎています'}</b>` : ''}</p>`;
     }
+    // 起きてきた時刻・布団に入った時刻を入れていない日は、iPhone の睡眠の時刻を代わりに使う(一覧・レポート・書き出しも同じ)
+    const sl = data.sleep_times || {};
+    const autoHint = (v, t, what) => (v ? '' : t ? `<p class="help auto-hint">未入力なので、iPhone の睡眠の${what} <b>${esc(t)}</b> を使います。</p>`
+      : `<p class="help">入れない日は、iPhone の睡眠の${what}を使います(届いた時)。</p>`);
     const wake = `<div class="obs-field"><div class="obs-label">起きてきた時刻</div><div class="row">
         ${hmInput('data-obs-hm="wake_time" style="max-width:120px" aria-label="起きてきた時刻(4桁)"', o.wake_time)}
-        ${curDate === today ? '<button class="chip-btn" data-act="wake-now">いま</button>' : ''}</div></div>`;
+        ${curDate === today ? '<button class="chip-btn" data-act="wake-now">いま</button>' : ''}</div>${autoHint(o.wake_time, sl.wake, '目が覚めた時刻')}</div>`;
     const isToday = curDate === today;
     const bed = `<div class="obs-field"><div class="obs-label">布団に入った時刻</div><div class="row">
         ${hmInput('data-obs-hm="bed_time" style="max-width:120px" aria-label="布団に入った時刻(4桁)"', o.bed_time)}
         ${isToday ? '<button class="chip-btn" data-act="bed-now">いま</button>' : ''}</div>
-        <p class="help">深夜 0〜3 時台も、この日の夜として入れます(例: 0120)。</p></div>`;
+        <p class="help">深夜 0〜3 時台も、この日の夜として入れます(例: 0120)。</p>${autoHint(o.bed_time, sl.bed, '眠り始めた時刻')}</div>`;
     const medBtn = (f, k, label, title, m) => {
       const sel = m.st === k;
       return `<button class="chip-btn med ${sel ? 'sel' : ''}" data-act="med" ${k === 'no' ? '' : 'data-lp="med"'} data-f="${f}" data-v="${k}" data-label="${esc(title + ': ' + label)}" aria-pressed="${sel}">${esc(label)}${sel && m.t ? `<small>${m.t}</small>` : ''}</button>`;
@@ -807,10 +811,11 @@
       day: () => card('日中のようす', scaleField('gait', o) + scaleField('lying', o) + scaleField('outing', o) +
         `<div class="obs-field"><div class="obs-label">仕事・習い事</div>${setChips('activity', ACTIVITY, o.activity)}</div>` +
         scaleField('meal', o, snack) + noteField(o, 'note_day', '例: 昼過ぎに2時間横になった')),
-      night: () => card('夜のようす', bed + scaleField('sleep_onset', o) +
-        '<p class="help" style="margin:-4px 0 8px">見ていて分かった日だけ。分からない日は空のままで。</p>' + scaleField('evening', o) +
+      night: () => card('夜のようす', scaleField('evening', o) +
         '<p class="help" style="margin:-4px 0 8px">夕食のあとから布団に入るまでを、あなたの目で見た印象で。</p>' +
-        scaleField('bath', o) + noteField(o, 'note_night', '例: 寝る前に足がつらそうだった')),
+        scaleField('bath', o) + bed + scaleField('sleep_onset', o) +
+        '<p class="help" style="margin:-4px 0 8px">見ていて分かった日だけ。分からない日は空のままで。</p>' +
+        noteField(o, 'note_night', '例: 寝る前に足がつらそうだった')),
       look: () => card('見た目のようす・本人のことば', scaleField('movement', o) +
         '<p class="help" style="margin:-4px 0 8px">あなたの目で見た印象で、いちばん目立った時で。</p>' +
         `<div class="obs-field"><div class="obs-label">本人が自分から口にしたこと</div>${setChips('complaint', COMPLAINT, o.complaint)}
@@ -916,7 +921,10 @@
   // 毎日つける項目(「記録した数」に数える)。間食・ことば・他の薬・仕事などは、あった日だけ押すので数えない
   const CORE = ['wake_time', 'getup', 'gait', 'lying', 'outing', 'meal', 'movement', 'med_morning', 'med_night', 'alcohol'];
   const filled = (v) => v != null && v !== '';
-  const coreCount = (o) => CORE.filter((k) => filled(o && o[k])).length;
+  // sl = その日の iPhone の睡眠の時刻 { wake, bed }。起きてきた時刻を入れていない日は、目が覚めた時刻があれば記録ありとする
+  const coreCount = (o, sl) => CORE.filter((k) => filled(o && o[k]) || (k === 'wake_time' && sl && sl.wake)).length;
+  // 時刻の行: 入れた時刻か、入れていない日は iPhone の睡眠の時刻({ auto } = 灰色で出す)
+  const timeCell = (v, a) => (v ? String(v).replace(/^0/, '') : a ? { auto: String(a).replace(/^0/, '') } : '');
   const OBS_META = ['date', 'recorded_by', 'updated_at'];
   const anyObs = (o) => !!o && Object.keys(o).some((k) => !OBS_META.includes(k) && filled(o[k]));
   const sym = (list, v) => (v != null && list[v] != null ? list[v] : '');
@@ -934,12 +942,12 @@
       ['歩行安定性', (o, h) => (h && h.steadiness ? String(h.steadiness) : ''), 0, 1],
       ['安静時心拍', (o, h) => (h && h.resting_hr != null ? String(Math.round(h.resting_hr)) : ''), 0, 1],
       ['心拍変動', (o, h) => (h && h.hrv != null ? String(Math.round(h.hrv)) : ''), 0, 1]],
-    morning: [['起きた時刻', (o) => String(o.wake_time || '').replace(/^0/, ''), 1], ['起き上がり', (o) => sym(SYM3, o.getup), 1]],
+    morning: [['起きた時刻', (o, h, n, sl) => timeCell(o.wake_time, sl && sl.wake), 1], ['起き上がり', (o) => sym(SYM3, o.getup), 1]],
     day: [['ふらつき', (o) => sym(SYM3, o.gait), 1], ['横になった', (o) => sym(['○', '少', '半', '全'], o.lying), 1],
       ['外出', (o) => sym(['無', '近', '外'], o.outing), 1], ['仕事など', (o) => actAbbr(o.activity)],
       ['食事', (o) => sym(['×', '少', '半', '普', '多'], o.meal), 1], ['間食', (o) => (o.night_snack === 1 ? '●' : '')]],
-    night: [['布団に入った', (o) => String(o.bed_time || '').replace(/^0/, '')], ['寝つき', (o) => sym(SYM3, o.sleep_onset)], ['寝るまで', (o) => sym(SYM3, o.evening)],
-      ['お風呂', (o) => sym(['–', 'シ', '湯'], o.bath)]],
+    night: [['寝るまで', (o) => sym(SYM3, o.evening)], ['お風呂', (o) => sym(['–', 'シ', '湯'], o.bath)],
+      ['布団に入った', (o, h, n, sl) => timeCell(o.bed_time, sl && sl.bed)], ['寝つき', (o) => sym(SYM3, o.sleep_onset)]],
     look: [['見た目', (o) => (o.movement != null ? String(o.movement) : ''), 1],
       ['ことば', (o) => setAbbr(o.complaint, [['pain', '痛'], ['dizzy', 'ぐ'], ['other', '他']])]],
     easy: [['楽な時間', (o) => setAbbr(o.easy_times, [['morning', '朝'], ['noon', '昼'], ['evening', '夕'], ['night', '夜']])],
@@ -984,6 +992,7 @@
     listData.obs.forEach((o) => { obsBy[o.date] = o; });
     listData.health.forEach((h) => { hBy[h.date] = h; });
     listData.memos.forEach((m) => { (memoBy[m.date] = memoBy[m.date] || []).push(m); });
+    const slBy = listData.sleep_times || {};
     const td = (d, inner, cls) => `<td class="${cls || ''}${d === today ? ' today' : ''}" data-act="goto-date" data-date="${d}">${inner}</td>`;
     const miss = '<span class="miss">・</span>';
     const head = `<tr><th class="lbl"></th>${days.map((d, i) => {
@@ -991,15 +1000,16 @@
       return `<th class="${w === 0 ? 'sun' : w === 6 ? 'sat' : ''}${d === today ? ' today' : ''}" data-act="goto-date" data-date="${d}">${i === 0 || dd === 1 ? `${m}/${dd}` : dd}<small>${DOW[w]}</small></th>`;
     }).join('')}</tr>`;
     const count = `<tr class="count"><td class="lbl">記録した数</td>${days.map((d) => {
-      const n = coreCount(obsBy[d]);
+      const n = coreCount(obsBy[d], slBy[d]);
       return td(d, n ? `${n}<small>/${CORE.length}</small>` : miss, n === CORE.length ? 'full' : n ? 'part' : '');
     }).join('')}</tr>`;
     const body = cardOrder(s).map((k) => {
       const name = LIST_NAMES[k] || (CARD_DEFS.find((c) => c[0] === k) || [k, k])[1];
-      const val = (fn, d) => fn(obsBy[d] || {}, hBy[d], (memoBy[d] || []).length);
+      const val = (fn, d) => fn(obsBy[d] || {}, hBy[d], (memoBy[d] || []).length, slBy[d]);
       let rows = (LIST_ROWS[k] || []).filter(([, fn, , auto]) => !auto || days.some((d) => val(fn, d))).map(([label, fn, core]) => `<tr><td class="lbl">${label}</td>${days.map((d) => {
-        const v = fn(obsBy[d] || {}, hBy[d], (memoBy[d] || []).length);
-        return td(d, v ? esc(v) : core ? miss : '');
+        const v = val(fn, d);
+        // { auto } = 入れていないので iPhone の睡眠の時刻(灰色)
+        return td(d, v && typeof v === 'object' ? `<span class="auto" title="iPhone の睡眠">${esc(v.auto)}</span>` : v ? esc(v) : core ? miss : '');
       }).join('')}</tr>`).join('');
       const nk = NOTE_OF[k];
       if (nk && days.some((d) => obsBy[d] && obsBy[d][nk])) rows += `<tr><td class="lbl">備考</td>${days.map((d) => td(d, obsBy[d] && obsBy[d][nk] ? '✎' : '')).join('')}</tr>`;
@@ -1014,7 +1024,8 @@
       <li>横になった: ○ ほとんどなし 少 2〜3時間 半 半日くらい 全 ほぼ一日 / 外出: 外 外出できた 近 近所だけ 無 なし</li>
       <li>仕事など: 出 会社出勤 残 出勤+残業 習 習い事 バ バレエ</li>
       <li>食事: 多 よく食べた 普 ふつう 半 半分くらい 少 少し × ほぼ食べず / 間食: ● 寝る前の間食</li>
-      <li>布団に入った時刻(深夜 0〜3 時台はその日の夜) / 寝つき: ○ すぐ眠れた △ 少し時間がかかった × なかなか眠れなかった / 寝るまで: ○ おだやか △ 少しつらそう × つらそう / お風呂: 湯 湯ぶね シ シャワー – 入らなかった</li>
+      <li>寝るまで: ○ おだやか △ 少しつらそう × つらそう / お風呂: 湯 湯ぶね シ シャワー – 入らなかった / 布団に入った時刻(深夜 0〜3 時台はその日の夜) / 寝つき: ○ すぐ眠れた △ 少し時間がかかった × なかなか眠れなかった</li>
+      <li>灰色の時刻 = 入れていない日の、iPhone の睡眠の時刻(起きた時刻 = 目が覚めた時刻、布団に入った = 眠り始めた時刻)。灰色の起きた時刻も「記録した数」に数えます</li>
       <li>見た目: 不随意運動 1〜5 / ことば: 痛 痛み ぐ ぐるぐる 他 その他</li>
       <li>楽な時間: 朝 昼 夕 夜 / 薬: ● 全部・飲んだ ◐ ${esc(medName(s))}以外 ◔ 一部 ○ 飲まなかった / 早く休んだ: ● 寝る前の薬が18時より前で「合っている」を押した日(その夜の眠りは次の日の列)</li>
       <li>歩く速さ km/時 / 歩幅 cm / 左右差(歩行非対称性)・両足支持(両足で支えている時間)・歩行安定性 % / 安静時心拍 回/分 / 心拍変動 ms(歩き方は iPhone をポケットに入れて歩いた日だけ)</li>
@@ -1153,6 +1164,7 @@
     Object.keys(SCALES).forEach((k) => { codes[k] = { label: SCALES[k].label, values: Object.fromEntries(SCALES[k].opts.map(([v, l]) => [v, l])) }; });
     codes.night_snack = { label: '寝る前の間食', values: { 1: 'あり' } };
     codes.bed_time = { label: '布団に入った時刻(記録する人が見た時刻。深夜 0〜3 時台は、その日の夜の続き)。Apple Watch の寝た時刻は health の bed_start' };
+    codes.sleep_times = { label: '起きてきた時刻・布団に入った時刻を入れていない日に、代わりに使う iPhone の睡眠の時刻(画面・レポート・CSV で使う)。wake = その日の朝に目が覚めた時刻(その日の health の bed_end)、bed = その日の夜に眠り始めた時刻(次の日の health の bed_start)。observe には入れていない' };
     codes.sleep_onset.label = '寝つき(記録する人が見ていて分かった日だけ)';
     codes.evening.label = '寝るまでのようす(夕食のあとから布団に入るまで。記録する人が見た印象)';
     codes.early_bed = { label: '早く休んだ日(寝る前の薬が18時より前で、記録した人が「合っている」と確かめた日)。夕方からの眠りは次の日の health に1晩として入る', values: { 1: 'はい' } };
@@ -1182,7 +1194,7 @@
       format: 'kuma-export-1', exported_at: new Date().toISOString(), from: data.from, to: data.to,
       settings: Object.fromEntries(['start_date', 'med2_label', 'last_appointment', 'next_appointment'].map((k) => [k, s[k] || ''])),
       codes: exportCodes(s),
-      observe: data.obs, health: data.health, memos: (data.memos || []).map((m) => ({ date: m.date, ts: m.ts, text: m.text })),
+      observe: data.obs, health: data.health, sleep_times: data.sleep_times || {}, memos: (data.memos || []).map((m) => ({ date: m.date, ts: m.ts, text: m.text })),
       weather: (data.weather || []).map((w) => ({ date: w.date, weather: wxLabel(w.wcode)[1], wcode: w.wcode, t_max: w.t_max, t_min: w.t_min, t_mean: w.t_mean,
         humidity: w.humidity, precip: w.precip, p_mean: w.p_mean, p_min: w.p_min, p_max: w.p_max, p_drop: w.p_drop, p_diff: w.p_diff, hourly: w.hourly, final: w.final }))
     };
@@ -1198,12 +1210,15 @@
     (data.memos || []).forEach((m) => { (memoBy[m.date] = memoBy[m.date] || []).push(`${hhmm(m.ts)} ${m.text}`); });
     (data.weather || []).forEach((w) => { wBy[w.date] = w; });
     const wx = (k) => (d) => (wBy[d] ? wBy[d][k] : '');
+    const slt = (d, k) => ((data.sleep_times || {})[d] || {})[k] || ''; // 入れていない日に使う iPhone の睡眠の時刻
     const cols = [
       ['日付', (d) => d], ['曜日', (d) => DOW[dowOf(d)]],
-      ['起きてきた時刻', (d, o) => o.wake_time || ''], ['起き上がり', (d, o) => name('getup', o.getup)], ['ふらつき', (d, o) => name('gait', o.gait)],
+      ['起きてきた時刻', (d, o) => o.wake_time || slt(d, 'wake')], ['起きてきた時刻の出どころ', (d, o) => (o.wake_time ? '記録' : slt(d, 'wake') ? 'iPhone の睡眠' : '')], ['起き上がり', (d, o) => name('getup', o.getup)], ['ふらつき', (d, o) => name('gait', o.gait)],
       ['横になっていた時間', (d, o) => name('lying', o.lying)], ['外出', (d, o) => name('outing', o.outing)], ['仕事・習い事', (d, o) => setNames(o.activity, ACTIVITY)],
       ['食事の量', (d, o) => name('meal', o.meal)], ['寝る前の間食', (d, o) => (o.night_snack === 1 ? 'あり' : '')],
-      ['布団に入った時刻', (d, o) => o.bed_time || ''], ['寝つき', (d, o) => name('sleep_onset', o.sleep_onset)], ['寝るまでのようす', (d, o) => name('evening', o.evening)], ['お風呂', (d, o) => name('bath', o.bath)],
+      ['寝るまでのようす', (d, o) => name('evening', o.evening)], ['お風呂', (d, o) => name('bath', o.bath)],
+      ['布団に入った時刻', (d, o) => o.bed_time || slt(d, 'bed')], ['布団に入った時刻の出どころ', (d, o) => (o.bed_time ? '記録' : slt(d, 'bed') ? 'iPhone の睡眠' : '')],
+      ['寝つき', (d, o) => name('sleep_onset', o.sleep_onset)],
       ['見た目(1-5)', (d, o) => (o.movement != null ? o.movement : '')], ['本人が口にしたこと', (d, o) => setNames(o.complaint, COMPLAINT)],
       ['楽そうだった時間帯', (d, o) => setNames(o.easy_times, EASY)],
       ['朝の薬', (d, o) => medState[parseMed(o.med_morning, true).st] || ''], ['朝の薬の時刻', (d, o) => parseMed(o.med_morning, true).t],
@@ -1252,7 +1267,7 @@
       const data = await call({ action: 'report', from, to });
       if (!data.ok) return;
       const marks = {};
-      data.obs.forEach((o) => { if (anyObs(o)) marks[o.date] = coreCount(o) === CORE.length ? 'full' : 'part'; });
+      data.obs.forEach((o) => { if (anyObs(o)) marks[o.date] = coreCount(o, (data.sleep_times || {})[o.date]) === CORE.length ? 'full' : 'part'; });
       data.memos.forEach((mm) => { if (!marks[mm.date]) marks[mm.date] = 'part'; });
       calMarks[ym] = marks;
       if (sheet && sheet.type === 'cal' && sheet.month === ym) renderOverlay();

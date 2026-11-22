@@ -89,7 +89,7 @@
     const days = [];
     const n = daysBetween(data.from, data.to) + 1;
     const idx = {};
-    for (let i = 0; i < n; i++) { const d = addDays(data.from, i); idx[d] = days.length; days.push({ date: d, o: null, health: null, memos: [], w: null }); }
+    for (let i = 0; i < n; i++) { const d = addDays(data.from, i); idx[d] = days.length; days.push({ date: d, o: null, health: null, memos: [], w: null, sl: (data.sleep_times || {})[d] || null }); }
     data.obs.forEach((o) => { if (o.date in idx) days[idx[o.date]].o = o; });
     (data.weather || []).forEach((w) => { if (w.date in idx) days[idx[w.date]].w = w; });
     data.health.forEach((h) => { if (h.date in idx) days[idx[h.date]].health = h; });
@@ -151,15 +151,20 @@
     const minutes = (t) => { let [h, m] = t.split(':').map(Number); if (h < 4) h += 24; return h * 60 + m; };
     const clock = (v) => `${pad(Math.floor(v / 60) % 24)}:${pad(v % 60)}`;
     // 時刻の中央値と幅(深夜 0〜3 時台は前の日の夜の続きとして並べる)
-    const clockText = (key) => {
-      const ts = vals((d) => (d.o && d.o[key] ? d.o[key] : null));
+    // 入れていない日は iPhone の睡眠の時刻で代わりにする(slk: wake = 目が覚めた時刻、bed = 眠り始めた時刻)
+    const timeOf = (d, key, slk) => (d.o && d.o[key] ? d.o[key] : d.sl && d.sl[slk] ? d.sl[slk] : null);
+    const clockText = (key, slk) => {
+      const ts = vals((d) => timeOf(d, key, slk));
       if (!ts.length) return '–';
+      const auto = days.filter((d) => !(d.o && d.o[key]) && d.sl && d.sl[slk]).length;
       const ms = ts.map(minutes).sort((a, b) => a - b);
-      return `中央値 ${clock(ms[Math.floor(ms.length / 2)])} <small>(早い日 ${clock(ms[0])} 〜 遅い日 ${clock(ms[ms.length - 1])}、記録 ${ms.length}日)</small>`;
+      return `中央値 ${clock(ms[Math.floor(ms.length / 2)])} <small>(早い日 ${clock(ms[0])} 〜 遅い日 ${clock(ms[ms.length - 1])}、${ms.length}日${auto ? `。うち ${auto}日は入れていないので iPhone の睡眠の時刻` : ''})</small>`;
     };
-    const wakeText = clockText('wake_time');
-    const bedText = clockText('bed_time');
-    const nightKnown = days.some((d) => d.o && (d.o.bed_time || d.o.sleep_onset != null || d.o.evening != null || d.o.bath != null));
+    const wakeText = clockText('wake_time', 'wake');
+    const bedText = clockText('bed_time', 'bed');
+    const nightKnown = days.some((d) => (d.o && (d.o.bed_time || d.o.sleep_onset != null || d.o.evening != null || d.o.bath != null)) || (d.sl && d.sl.bed));
+    // 日別の一覧の時刻: 入れていない日の iPhone の睡眠の時刻は ( ) で
+    const timeCell = (d, key, slk) => (d.o && d.o[key] ? d.o[key] : d.sl && d.sl[slk] ? `(${d.sl[slk]})` : '');
     const dist = (key) => {
       const def = SC[key];
       const c = days.filter((d) => d.o && d.o[key] != null);
@@ -206,10 +211,10 @@
       <tr><th>仕事・習い事</th><td>会社出勤 ${actDays('work')}日 <small>(うち残業 ${actDays('overtime')}日)</small> / 習い事 ${actDays('lesson')}日 / バレエ ${actDays('ballet')}日</td></tr>
       <tr><th>食事の量</th><td>${dist('meal')}<br><small>寝る前の間食 ${snackDays}日</small></td></tr>
       <tr><th>起きてきた時刻</th><td>${wakeText}</td></tr>
-      ${nightKnown ? `<tr><th>布団に入った時刻</th><td>${bedText}</td></tr>
-      <tr><th>寝つき</th><td>${dist('sleep_onset')}</td></tr>
-      <tr><th>寝るまでのようす</th><td>${dist('evening')}</td></tr>
-      <tr><th>お風呂</th><td>${dist('bath')}</td></tr>` : ''}
+      ${nightKnown ? `<tr><th>寝るまでのようす</th><td>${dist('evening')}</td></tr>
+      <tr><th>お風呂</th><td>${dist('bath')}</td></tr>
+      <tr><th>布団に入った時刻</th><td>${bedText}</td></tr>
+      <tr><th>寝つき</th><td>${dist('sleep_onset')}</td></tr>` : ''}
       <tr><th>睡眠(Apple Watch)</th><td>平均 ${hm(avg(sleep))} <small>/ 5分以上の目覚め 平均 ${f1(avg(awak))}回${naps.length ? ` / 昼寝など ${naps.length}日(平均 ${Math.round(avg(naps))}分)` : ''}(データ ${sleep.length}日)</small></td></tr>
       <tr><th>歩数(iPhone / Watch)</th><td>平均 ${steps.length ? Math.round(avg(steps)).toLocaleString() + '歩' : '–'} <small>(データ ${steps.length}日)</small></td></tr>
       ${gaitText ? `<tr><th>歩き方(iPhone、期間の平均)</th><td>${gaitText}<br><small>iPhone をポケットに入れて歩いた時に自動で測られる値。左右差・両足支持時間は大きいほど、歩く速さ・歩幅・歩行安定性は小さいほど、歩きにくさの目安</small></td></tr>` : ''}
@@ -276,12 +281,12 @@
       return m.st ? `${MED_SYM[m.st] || ''}${m.t ? `<small>${m.t}</small>` : ''}${early}` : '';
     };
     const prnCell = (d) => { if (!d.o) return ''; const t = prnList(d.o).map(prnItem); return t.length ? `${t.length}<small>${t.map((p) => esc(p.name ? p.t + ' ' + p.name : p.t)).join('<br>')}</small>` : (d.o.prn ? d.o.prn : ''); };
-    const table = `<table class="days"><thead><tr><th>日付</th><th>起床</th><th class="c">起上</th><th class="c">ふら</th><th class="c">横</th><th class="c">外出</th><th class="c">仕事等</th><th class="c">食事</th>${nightKnown ? '<th>布団</th><th class="c">寝つき</th><th class="c">夜</th>' : ''}<th class="c">見た目</th>
+    const table = `<table class="days"><thead><tr><th>日付</th><th>起床</th><th class="c">起上</th><th class="c">ふら</th><th class="c">横</th><th class="c">外出</th><th class="c">仕事等</th><th class="c">食事</th>${nightKnown ? '<th class="c">夜</th><th>布団</th><th class="c">寝つき</th>' : ''}<th class="c">見た目</th>
       ${MEDS.map(([, l]) => `<th class="c med">${esc(l)}</th>`).join('')}<th class="num">他の薬</th><th class="c med">アルコール</th><th class="num">睡眠</th><th class="num">目覚</th><th class="num">歩数</th>${wDays.length ? '<th class="c">天気</th><th class="num">気圧</th>' : ''}</tr></thead><tbody>
       ${days.map((d) => `<tr><td>${md(d.date)} <span style="color:var(--muted)">${DOW[dowOf(d.date)]}</span></td>
-        <td>${d.o && d.o.wake_time ? d.o.wake_time : ''}</td>
+        <td>${timeCell(d, 'wake_time', 'wake')}</td>
         <td class="c">${cell('getup', d)}</td><td class="c">${cell('gait', d)}</td><td class="c">${cell('lying', d)}</td><td class="c">${cell('outing', d)}</td><td class="c">${d.o ? ACT_SYM.filter(([k]) => setOf(d.o.activity).has(k)).map((x) => x[1]).join('') : ''}</td><td class="c">${cell('meal', d)}${d.o && d.o.night_snack === 1 ? '<small>+間</small>' : ''}</td>${nightKnown ? `
-        <td>${d.o && d.o.bed_time ? d.o.bed_time : ''}</td><td class="c">${cell('sleep_onset', d)}</td><td class="c">${cell('evening', d)}${d.o && d.o.bath != null ? `<small>${SC.bath.sym[d.o.bath]}</small>` : ''}</td>` : ''}
+        <td class="c">${cell('evening', d)}${d.o && d.o.bath != null ? `<small>${SC.bath.sym[d.o.bath]}</small>` : ''}</td><td>${timeCell(d, 'bed_time', 'bed')}</td><td class="c">${cell('sleep_onset', d)}</td>` : ''}
         <td class="c">${d.o && d.o.movement != null ? d.o.movement : ''}</td>
         ${MEDS.map(([f]) => `<td class="c">${medCell(f, d)}</td>`).join('')}
         <td class="num">${prnCell(d)}</td><td class="c">${d.o && d.o.alcohol === 1 ? 'あり' : ''}</td>
@@ -291,7 +296,7 @@
         <td class="c">${d.w ? `${wxLabel(d.w.wcode)[0]}${d.w.t_max != null && d.w.t_min != null ? `<small>${Math.round(d.w.t_max)}/${Math.round(d.w.t_min)}℃</small>` : ''}` : ''}</td>
         <td class="num">${d.w && d.w.p_mean != null ? `${Math.round(d.w.p_mean)}${d.w.p_diff != null ? `<small>${signed(Math.round(d.w.p_diff), 0).replace('±', '')}</small>` : ''}` : ''}</td>` : ''}</tr>`).join('')}
     </tbody></table>
-    <p class="leg">起上・ふら(ふらつき): ○ スムーズ/なし △ ゆっくり/少し × つらそう/目立つ ／ 横 = 横になっていた時間 ／ 外出: 外 外出できた 近 近所だけ – なし ／ 仕事等: 出 会社出勤 残 残業 習 習い事 バ バレエ ／ 食事: 多 よく食べた 普 ふつう 半 半分くらい 少 少し × ほぼ食べず(+間 = 寝る前の間食あり)${nightKnown ? ' ／ 布団 = 布団に入った時刻 ／ 寝つき: ○ すぐ眠れた △ 少し時間がかかった × なかなか眠れなかった ／ 夜 = 寝るまでのようす ○ おだやか △ 少しつらそう × つらそう(小さな字はお風呂: 湯 湯ぶね シ シャワー – 入らなかった)' : ''} ／ 見た目 = 不随意運動 1〜5 ／ 朝の薬: ● ${esc(mn)}全部 ◔ ${esc(mn)}一部 ◐ ${esc(mn)}以外 ／ 寝る前の薬: ● 飲んだ ◔ 一部 ○ 飲まなかった(空欄は記録なし。小さな数字は飲んだ時刻。早 = 体調などで早く休んだ日で、その夜の眠りは次の日の行) ／ 目覚 = 5分以上目が覚めた回数${wDays.length ? ' ／ 天気: 小さな数字は最高/最低気温 ／ 気圧: 1日の平均 hPa(小さな数字は前の日との差)' : ''}</p>`;
+    <p class="leg">起床・布団: ( ) は入れていない日で、iPhone の睡眠の時刻(起床 = 目が覚めた時刻、布団 = 眠り始めた時刻) ／ 起上・ふら(ふらつき): ○ スムーズ/なし △ ゆっくり/少し × つらそう/目立つ ／ 横 = 横になっていた時間 ／ 外出: 外 外出できた 近 近所だけ – なし ／ 仕事等: 出 会社出勤 残 残業 習 習い事 バ バレエ ／ 食事: 多 よく食べた 普 ふつう 半 半分くらい 少 少し × ほぼ食べず(+間 = 寝る前の間食あり)${nightKnown ? ' ／ 夜 = 寝るまでのようす ○ おだやか △ 少しつらそう × つらそう(小さな字はお風呂: 湯 湯ぶね シ シャワー – 入らなかった) ／ 布団 = 布団に入った時刻 ／ 寝つき: ○ すぐ眠れた △ 少し時間がかかった × なかなか眠れなかった' : ''} ／ 見た目 = 不随意運動 1〜5 ／ 朝の薬: ● ${esc(mn)}全部 ◔ ${esc(mn)}一部 ◐ ${esc(mn)}以外 ／ 寝る前の薬: ● 飲んだ ◔ 一部 ○ 飲まなかった(空欄は記録なし。小さな数字は飲んだ時刻。早 = 体調などで早く休んだ日で、その夜の眠りは次の日の行) ／ 目覚 = 5分以上目が覚めた回数${wDays.length ? ' ／ 天気: 小さな数字は最高/最低気温 ／ 気圧: 1日の平均 hPa(小さな数字は前の日との差)' : ''}</p>`;
 
     page.innerHTML = header + note + summary +
       `<h2>日ごとの推移</h2><div class="avoid">${chart1}</div>${chartP}<div class="avoid" style="margin-top:8px">${chart2}</div><div class="avoid" style="margin-top:8px">${chart3}</div>${gaitCharts}` +
