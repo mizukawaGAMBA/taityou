@@ -21,7 +21,7 @@
     const qp = new URLSearchParams(location.search);
     if (qp.get('api')) { cfg.apiUrl = qp.get('api').trim(); save(KEYS.cfg, cfg); history.replaceState(null, '', location.pathname); }
   } catch (e) { /* 無視 */ }
-  const QUEUE_ACTIONS = new Set(['saveObs', 'addMemo', 'updateMemo', 'deleteMemo', 'react', 'seenReactions', 'saveSettings', 'consentHealth', 'saveImageConfig', 'deleteImage']);
+  const QUEUE_ACTIONS = new Set(['saveObs', 'addMemo', 'updateMemo', 'deleteMemo', 'react', 'seenReactions', 'saveSettings', 'consentHealth', 'saveImageConfig', 'deleteImage', 'striveDone', 'striveDelete']);
   let cache = load(KEYS.state, null);
   // 前の版の未送信(服薬ボタンなど)は今の仕組みでは送れないので捨てる
   let queue = load(KEYS.queue, []).filter((q) => q && q.req && QUEUE_ACTIONS.has(q.req.action));
@@ -156,10 +156,11 @@
     for (let i = 0; i < bin.length; i++) arr[i] = bin.charCodeAt(i);
     return new Blob([arr], { type: m[1] });
   }
-  async function cachePut(id, blob) {
+  async function cachePutKey(key, blob) {
     if (!window.caches) return;
-    try { const c = await caches.open(IMG_CACHE); await c.put(imgKey(id), new Response(blob, { headers: { 'Content-Type': blob.type } })); } catch (e) { /* 保存できなくても表示はできる */ }
+    try { const c = await caches.open(IMG_CACHE); await c.put(key, new Response(blob, { headers: { 'Content-Type': blob.type } })); } catch (e) { /* 保存できなくても表示はできる */ }
   }
+  const cachePut = (id, blob) => cachePutKey(imgKey(id), blob);
   async function loadUpImage(id) {
     if (up.url[id] || up.loading[id]) return;
     if (up.failed[id] && Date.now() - up.failed[id] < 60000) return;
@@ -192,6 +193,33 @@
     return Array.from(ids);
   }
   async function preloadImages() { await Promise.all(wantedImageIds().concat(cfg.token ? [] : lookImageIds()).map((id) => loadUpImage(id))); }
+
+  /* ---- StrivePD のスクショ(本人が毎週送る。記録する人が一覧で見て、分析用に書き出す) ----
+   * 画像は「登録した画像」とは別のシート(strive)に入る。見た画像はこの端末にも保存して使い回す */
+  const shot = { url: {}, loading: {}, failed: {} };
+  const shotKey = (id) => new URL('__kuma_strive/' + id, location.href).href;
+  async function shotBlob(id) {
+    if (window.caches) { try { const c = await caches.open(IMG_CACHE); const hit = await c.match(shotKey(id)); if (hit) return await hit.blob(); } catch (e) { /* 無視 */ } }
+    const data = await call({ action: 'getStrive', id });
+    if (!data.ok) throw new Error(data.error || 'get');
+    const blob = dataUrlToBlob(data.data);
+    await cachePutKey(shotKey(id), blob);
+    return blob;
+  }
+  async function loadShot(id) {
+    if (shot.url[id] || shot.loading[id]) return;
+    if (shot.failed[id] && Date.now() - shot.failed[id] < 60000) return;
+    shot.loading[id] = true;
+    try {
+      shot.url[id] = URL.createObjectURL(await shotBlob(id));
+      if (sheet && (sheet.type === 'striveweek' || sheet.type === 'shot')) renderOverlay();
+    } catch (e) {
+      shot.failed[id] = Date.now();
+    } finally {
+      delete shot.loading[id];
+    }
+  }
+  const blobToDataUrl = (blob) => new Promise((res, rej) => { const fr = new FileReader(); fr.onload = () => res(fr.result); fr.onerror = () => rej(new Error('read')); fr.readAsDataURL(blob); });
 
   /* ---- ログイン画面の見た目 ----
    * ログインしている間に、ログイン画面の画像と、本人・記録する人の名前をこの端末に覚えておく(ログアウトしても消さない)。
@@ -663,7 +691,22 @@
           <button class="dismiss" data-act="seen-reactions">ありがとう ♡</button></div>`
       : `<div class="bubble">${esc(patMsg || greeting())}</div>`;
     return topbar(jpDate(today), right) +
-      `<section class="card room"><button class="bear-btn ${patMsg ? 'bear-pat' : ''}" data-act="pat" aria-label="くまをなでる">${pic(slot, 'bear-bob')}</button>${bubble}</section>`;
+      `<section class="card room"><button class="bear-btn ${patMsg ? 'bear-pat' : ''}" data-act="pat" aria-label="くまをなでる">${pic(slot, 'bear-bob')}</button>${bubble}</section>` +
+      patientStrive(data.strive);
+  }
+  // 日曜日(か、記録する人が「きょう出す」を押した日)の案内: StrivePD の画面のスクショを選んで送る。体調のことばは出さない
+  const shotPicker = (label, cls) => `<label class="btn ${cls || 'primary'} upload-btn">${label}<input type="file" accept="image/*" multiple data-upload="strive"></label>`;
+  function patientStrive(st) {
+    if (!st || (!st.show && !striveProg)) return '';
+    const n = st.count || 0;
+    return `<section class="card strive-ask pat">
+      <h2>📷 StrivePD の しゃしん <span class="link">${jpShort(st.week)}〜${jpShort(st.to)}</span></h2>
+      <p>「週」の画面を 1まい と、「日」の画面を 月〜日の 7まい。スクリーンショットを えらんで、くまに とどけてね。<small class="muted">(いちどに ${SHOT_BATCH}まい まで)</small></p>
+      ${striveProg ? `<p class="strive-prog" role="status">おくっています… ${striveProg.i} / ${striveProg.n}まい<br><small>おわるまで この画面のままで まってね</small></p>`
+        : shotPicker(n ? 'しゃしんを たす' : 'しゃしんを えらぶ', n ? 'outline big' : 'primary big')}
+      ${n && !striveProg ? `<p class="strive-count">いま <b>${n}</b>まい とどいているよ</p>
+        <button class="btn primary" data-act="strive-done">これで おしまい</button><p class="help center">たりなくても だいじょうぶ。</p>` : ''}
+    </section>`;
   }
 
   /* ========== 画面: 記録する人 ========== */
@@ -762,8 +805,21 @@
       alcohol: () => card('アルコール', scaleField('alcohol', o, '', true) + noteField(o, 'note_alcohol', '例: 夕食でビール1杯')),
       memo: () => memoCard(data, curDate)
     };
-    return nav + progress + weatherLine(data.weather, isToday) + (isToday ? forecastLine(s, curDate, data.weather) : '') + cardOrder(s).map((k) => cards[k]()).join('') +
+    return nav + progress + (isToday ? supporterStrive(data.strive, s) : '') + weatherLine(data.weather, isToday) + (isToday ? forecastLine(s, curDate, data.weather) : '') + cardOrder(s).map((k) => cards[k]()).join('') +
       `<p class="help center" style="margin:2px 0 12px">押した内容はその場で保存されます。</p>`;
+  }
+
+  // StrivePD のスクショの日の案内(記録の画面の上。本人が送り終わると消える)
+  function supporterStrive(st, s) {
+    if (!st || (!st.show && !striveProg)) return '';
+    const t = thanksNow(s);
+    return `<section class="card strive-ask">
+      <h2>📷 StrivePD のスクショの日 <span class="link">${jpShort(st.week)}(月)〜${jpShort(st.to)}(日)</span></h2>
+      <p class="small">本人に「アップして」と声をかけてください。本人の画面(くまの部屋)にも同じ案内が出ています。StrivePD の「週」の画面1枚と、「日」の画面(月〜日)7枚です(一度に${SHOT_BATCH}枚まで選べます)。${st.sunday ? '日曜の分は、夜に撮ると1日分そろいます。' : ''}</p>
+      <p class="strive-count">届いた枚数 <b>${st.count || 0}</b> / ${st.full}枚</p>
+      <p class="help">本人が${st.full}枚送るか「これでおしまい」を押すと、この案内は両方の画面から消え、${t ? `お礼のスタンプ「${esc(t.label)}」が本人に届きます` : 'お礼のスタンプは「設定」タブで選べます(いまは「なし」)'}。届いた画像は「一覧」タブで見られます。</p>
+      ${striveProg ? `<p class="strive-prog" role="status">送っています… ${striveProg.i} / ${striveProg.n}枚</p>` : shotPicker('この iPhone から足す', 'outline')}
+    </section>`;
   }
 
   // 歩き方・心拍: その日の平均と、1 日の中の幅(時刻ごとの値 metric_series から)
@@ -957,7 +1013,61 @@
       <section class="card"><h2>医師に見せるレポート</h2>
         <p class="small" style="margin-bottom:8px">PC のブラウザで開き、印刷 →「PDF に保存」。期間はレポート画面でも変えられます。</p>
         <a class="btn primary" href="report.html?from=${from}&to=${listData.to}" target="_blank" rel="noopener">レポートを開く(${jpShort(from)}〜${jpShort(listData.to)})</a></section>
+      ${striveCardHTML()}
       ${exportCardHTML(s)}`;
+  }
+
+  /* ---- 一覧: StrivePD のスクショ(週ごとの枚数。押すとその週の画像) ---- */
+  const weekLabel = (w) => `${jpShort(w)}〜${jpShort(addDays(w, 6))}`;
+  function striveCardHTML() {
+    if (!striveData) { loadStrive(); return ''; }
+    const st = striveData.strive || {};
+    const items = striveData.items || [];
+    if (!st.on && !items.length) return '';
+    const by = {};
+    items.forEach((m) => { (by[m.week] = by[m.week] || []).push(m); });
+    if (st.on && !by[st.week]) by[st.week] = [];
+    const weeks = Object.keys(by).sort().reverse();
+    const rows = weeks.map((w) => {
+      const n = by[w].length;
+      const cur = w === st.week;
+      const mark = n >= st.full ? '<span class="chip ok">そろった ✓</span>' : cur && st.done ? '<span class="chip ok">送り終わり ✓</span>' : cur ? '<span class="chip">まだ</span>' : '';
+      return `<li><button class="strive-week" data-act="strive-week" data-week="${w}"><span class="spacer"><b>${weekLabel(w)}</b>${cur ? ' <small class="muted">今回の分</small>' : ''}</span><span>${n}枚</span>${mark}<span class="muted" aria-hidden="true">›</span></button></li>`;
+    }).join('');
+    let ask = '';
+    if (st.on && !st.done) {
+      ask = st.show ? `<p class="help">きょうは本人の画面に案内が出ています(${weekLabel(st.week)}の分)。</p>`
+        : `<button class="btn outline" data-act="strive-ask">きょう本人の画面に案内を出す</button>
+          <p class="help">日曜日に送れなかった時に。${weekLabel(st.week)}の分の案内を、きょうだけ本人の画面と記録の画面に出します。</p>`;
+    }
+    // 今回の分に、記録する人の iPhone から足す(送り終わったあとでも。足した分ではお礼は送らない)
+    const add = striveProg ? `<p class="strive-prog" role="status">送っています… ${striveProg.i} / ${striveProg.n}枚</p>`
+      : shotPicker(`今回の分(${weekLabel(st.week)})に、この iPhone から足す`, 'outline');
+    return `<section class="card"><h2>StrivePD のスクショ <span class="link">${st.on ? '毎週日曜日に案内' : '案内は止めています'}</span></h2>
+      ${rows ? `<ul class="strive-weeks">${rows}</ul>` : ''}
+      ${ask}
+      <div class="btn-col" style="margin:6px 0 4px">${add}</div>
+      <p class="help">週(月〜日)を押すと、その週の画像が見られます。分析用に保存するのは、下の「分析用にデータを保存」から。スクショは家族のスプレッドシートに入るので、保存したあとは古い週を消すと軽くなります。</p></section>`;
+  }
+  // その週の画像(小さく並べる。押すと大きく)
+  function striveWeekSheetHTML() {
+    const w = sheet.week;
+    const items = ((striveData && striveData.items) || []).filter((m) => m.week === w);
+    items.forEach((m) => loadShot(m.id));
+    const cells = items.map((m, i) => `<button class="shot-cell" data-act="shot-open" data-id="${esc(m.id)}" aria-label="${i + 1}枚目を大きく見る">${shot.url[m.id] ? `<img src="${esc(shot.url[m.id])}" alt="">` : `<span class="muted small">${shot.failed[m.id] ? '読めません' : '読み込み中…'}</span>`}<small>${i + 1}</small></button>`).join('');
+    return wrapSheet(`<h3>StrivePD ${weekLabel(w)} <span class="chip">${items.length}枚</span></h3>
+      ${items.length ? `<div class="shot-grid">${cells}</div>` : '<p class="muted small">まだ届いていません。</p>'}
+      <div class="actions">${items.length ? '<button class="btn danger" data-act="strive-week-del">この週の画像を全部消す</button>' : ''}<button class="btn ghost" data-act="sheet-close">閉じる</button></div>
+      <p class="help">押すと大きく見られます。消すのは、分析用に保存したあとに。</p>`);
+  }
+  function shotSheetHTML() {
+    const m = ((striveData && striveData.items) || []).find((x) => x.id === sheet.id);
+    if (!m) { sheet = { type: 'striveweek', week: sheet.week }; return striveWeekSheetHTML(); }
+    loadShot(m.id);
+    const who = m.by === 'patient' ? '本人' : m.by === 'supporter' ? '記録する人' : '';
+    return wrapSheet(`<div class="shot-big">${shot.url[m.id] ? `<img src="${esc(shot.url[m.id])}" alt="StrivePD のスクショ">` : `<p class="muted center">${shot.failed[m.id] ? '画像を読めませんでした' : '読み込んでいます…'}</p>`}</div>
+      <p class="small">${weekLabel(m.week)}の分 ・ ${esc(fmtStamp(m.created_at, true))} に${who ? esc(who) + 'が' : ''}送信${m.w && m.h ? ` ・ ${m.w}×${m.h}` : ''}</p>
+      <div class="actions two"><button class="btn outline" data-act="strive-week" data-week="${esc(m.week)}">‹ この週に戻る</button><button class="btn danger" data-act="shot-del">この画像を消す</button></div>`);
   }
 
   /* ---- 分析用にデータを保存(期間を選んでファイルに書き出す) ----
@@ -972,8 +1082,31 @@
       <div class="row"><div style="flex:1"><label class="field"><span>開始日</span><input type="date" data-export="from" value="${esc(exportRange.from)}" min="${sd}" max="${today}"></label></div>
         <div style="flex:1"><label class="field"><span>終了日</span><input type="date" data-export="to" value="${esc(exportRange.to)}" min="${sd}" max="${today}"></label></div></div>
       <div class="btn-col"><button class="btn" data-act="export" data-fmt="json">データ一式を保存(分析用・JSON)</button>
-        <button class="btn outline" data-act="export" data-fmt="csv">日ごとの表を保存(Excel 用・CSV)</button></div>
-      <p class="help">健康の記録が入ったファイルです。家族の外には渡さないでください。</p></section>`;
+        <button class="btn outline" data-act="export" data-fmt="csv">日ごとの表を保存(Excel 用・CSV)</button>
+        ${striveData && (striveData.items || []).length ? '<button class="btn outline" data-act="export" data-fmt="strive">StrivePD のスクショを保存(分析用・JSON)</button>' : ''}</div>
+      <p class="help">健康の記録が入ったファイルです。家族の外には渡さないでください。${striveData && (striveData.items || []).length ? 'StrivePD のスクショは、期間に重なる週(月〜日)の分を 1 つのファイルにまとめます。' : ''}</p></section>`;
+  }
+  // StrivePD のスクショを 1 つのファイルに(画像は data URL のまま。分析の時に画像に戻す)
+  async function exportStrive() {
+    const r = exportRange || {};
+    if (!r.from || !r.to || r.from > r.to) { toast('期間を選び直してください'); return; }
+    toast('StrivePD のスクショを集めています…');
+    let list;
+    try { list = await call({ action: 'striveList' }); } catch (e) { toast('通信できませんでした'); return; }
+    if (!list.ok) { toast(list.message || '書き出せませんでした'); return; }
+    striveData = list;
+    const items = list.items.filter((m) => m.week <= r.to && addDays(m.week, 6) >= r.from);
+    if (!items.length) { toast('この期間の StrivePD のスクショはありません'); return; }
+    const out = [];
+    for (let i = 0; i < items.length; i++) {
+      toast(`StrivePD のスクショを読み込んでいます… ${i + 1} / ${items.length}枚`);
+      const m = items[i];
+      try { out.push({ week: m.week, week_end: addDays(m.week, 6), no: i + 1, created_at: m.created_at, by: m.by, name: m.name, w: m.w, h: m.h, data: await blobToDataUrl(await shotBlob(m.id)) }); }
+      catch (e) { toast('読み込めない画像がありました。通信を確かめて、もう一度お試しください'); return; }
+    }
+    downloadText(`kuma-strive_${r.from}_${r.to}.json`, JSON.stringify({ format: 'kuma-strive-1', exported_at: new Date().toISOString(), from: r.from, to: r.to,
+      note: 'StrivePD の「週」と「日」の画面のスクショ。week = その週の月曜日(月〜日)。data は JPEG の data URL', items: out }), 'application/json');
+    toast(`${out.length}枚を保存しました`);
   }
   async function exportData(fmt) {
     const r = exportRange || {};
@@ -1167,6 +1300,7 @@
     </form>
     ${orderCardHTML(s)}
     ${weatherCardHTML(s)}
+    ${striveSettingsHTML(s)}
     ${healthAdminHTML(s)}
     <section class="card"><h2>この端末</h2><p class="small">ログイン中: ${esc(cfg.name || '')}(記録する人)</p>
       <button class="btn ghost" data-act="logout" style="margin-top:8px">ログアウト</button></section>`;
@@ -1183,6 +1317,27 @@
         <button type="submit" class="btn">場所を保存</button>
       </form>
       <p class="help">${on ? `いまの場所: ${esc(s.weather_place)}。記録の開始日の前の日から、きょうまでの分が入ります(3か月より前の分は取れません)。` : 'いまは取り込んでいません。'}</p></section>`;
+  }
+
+  // StrivePD のスクショ: 日曜日の案内と、送り終えた時のお礼のスタンプ
+  function striveSettingsHTML(s) {
+    const on = s.strive_on === '1';
+    const t = thanksNow(s);
+    const list = reactionsNow();
+    const cur = t ? list.find((r) => r.id === t.type) || { id: t.type, label: t.label, image: t.image } : null;
+    const cells = [`<button class="cell ${!t ? 'sel' : ''}" data-act="strive-thanks" data-type="" aria-pressed="${!t}"><span class="remoji">ー</span><span>なし</span></button>`]
+      .concat(list.map((r) => `<button class="cell ${t && t.type === r.id ? 'sel' : ''}" data-act="strive-thanks" data-type="${esc(r.id)}" aria-pressed="${!!(t && t.type === r.id)}">${reactionVisual(r)}<span>${esc(r.label)}</span></button>`)).join('');
+    const from = String(s.supporter_name || '').trim() || cfg.name || '家族';
+    return `<section class="card"><h2>StrivePD のスクショ</h2>
+      <p class="small" style="margin-bottom:8px">毎週日曜日に、本人の画面(くまの部屋)とこの記録の画面に「StrivePD の『週』と『日』の画面のスクショを送ってね」という案内を出します。本人は一度に${SHOT_BATCH}枚まで選べます。本人が送り終わると(8枚そろうか「これでおしまい」を押すと)案内は消え、下で選んだお礼のスタンプが本人に届きます。届いた画像は「一覧」タブで見られて、分析用に保存できます。</p>
+      <label class="field"><span>日曜日の案内</span>
+        <select data-setting="strive_on"><option value="1" ${on ? 'selected' : ''}>出す</option><option value="0" ${on ? '' : 'selected'}>出さない</option></select></label>
+      <div class="field"><span>お礼のスタンプ</span></div>
+      <div class="img-grid">${cells}</div>
+      <label class="field" style="margin-top:12px"><span>スタンプに添えることば(任意)</span>
+        <input type="text" id="strive-thanks-msg" maxlength="200" value="${esc(t ? t.message || '' : '')}" placeholder="例: ありがとう！たすかるよ" ${t ? '' : 'disabled'} enterkeyhint="done" autocomplete="off"></label>
+      ${cur ? `<div class="thanks-preview"><span class="muted small">本人の画面では:</span><div class="bubble reaction"><span class="from">${esc(from)}さんから</span>${reactionVisual(cur, 'in-bubble')} ${esc(cur.label)}${t.message ? '<br>' + esc(t.message) : ''}</div></div>` : ''}
+      <p class="help">スタンプの絵とことばは「くま」タブの「ひとことの種類」で変えられます。お礼は、ふだんのひとことと同じように本人のふきだしに出ます(本人が送り終えた時だけ。こちらの iPhone から足した時は送りません)。</p></section>`;
   }
 
   // 記録画面のカテゴリーの並び順(↑↓ で入れ替え、すぐ保存)
@@ -1456,7 +1611,8 @@
   function renderOverlay() {
     const el = document.getElementById('overlay');
     if (!sheet) { el.innerHTML = ''; return; }
-    const map = { memo: memoSheetHTML, key: keySheetHTML, psettings: patientSettingsHTML, health: healthSheetHTML, slot: slotSheetHTML, react: reactSheetHTML, image: imageSheetHTML, medtime: medTimeSheetHTML, cal: calSheetHTML, early: earlySheetHTML };
+    const map = { memo: memoSheetHTML, key: keySheetHTML, psettings: patientSettingsHTML, health: healthSheetHTML, slot: slotSheetHTML, react: reactSheetHTML, image: imageSheetHTML, medtime: medTimeSheetHTML, cal: calSheetHTML, early: earlySheetHTML,
+      striveweek: striveWeekSheetHTML, shot: shotSheetHTML };
     el.innerHTML = map[sheet.type] ? map[sheet.type]() : '';
     if (sheet && sheet.type === 'memo') { const ta = el.querySelector('textarea'); if (ta && !sheet.focused) { sheet.focused = true; setTimeout(() => ta.focus(), 50); } }
   }
@@ -1582,10 +1738,11 @@
   function hasAlpha(ctx, w, h) {
     try { const d = ctx.getImageData(0, 0, w, h).data; for (let i = 3; i < d.length; i += 16) if (d[i] < 250) return true; return false; } catch (e) { return true; }
   }
+  const decodeImage = (url) => new Promise((res, rej) => { const i = new Image(); i.onload = () => res(i); i.onerror = () => rej(new Error('decode')); i.src = url; });
   async function shrinkImage(file) {
     const url = URL.createObjectURL(file);
     try {
-      const img = await new Promise((res, rej) => { const i = new Image(); i.onload = () => res(i); i.onerror = () => rej(new Error('decode')); i.src = url; });
+      const img = await decodeImage(url);
       const w = img.naturalWidth || 400, h = img.naturalHeight || 400;
       for (const max of [400, 320, 240]) {
         const sc = Math.min(1, max / Math.max(w, h));
@@ -1653,6 +1810,106 @@
       toast(`${done}枚を登録しました。${ng}枚は登録できませんでした(${why})`, { label: 'OK', onClick: () => {} });
     }
   }
+
+  /* ---- StrivePD のスクショを送る ----
+   * 文字やグラフが読めるように、幅 760px までに縮めた JPEG にする(1枚 約 100〜250KB)。大きすぎたら画質と幅を下げる */
+  async function shrinkShot(file) {
+    const url = URL.createObjectURL(file);
+    try {
+      const img = await decodeImage(url);
+      const w = img.naturalWidth || 760, h = img.naturalHeight || 1600;
+      for (const [mw, mh, q] of [[760, 1700, 0.8], [760, 1700, 0.66], [640, 1400, 0.66], [540, 1200, 0.6]]) {
+        const sc = Math.min(1, mw / w, mh / h);
+        const cw = Math.max(1, Math.round(w * sc)), ch = Math.max(1, Math.round(h * sc));
+        const c = document.createElement('canvas'); c.width = cw; c.height = ch;
+        const ctx = c.getContext('2d'); ctx.fillStyle = '#fff'; ctx.fillRect(0, 0, cw, ch); ctx.drawImage(img, 0, 0, cw, ch);
+        const data = c.toDataURL('image/jpeg', q);
+        if (data.startsWith('data:image/jpeg') && data.length <= 390000) return { data, w: cw, h: ch };
+      }
+      throw new Error('big');
+    } finally { URL.revokeObjectURL(url); }
+  }
+  let striveProg = null; // 送っている途中 { i: 何枚目, n: 全部で }
+  let striveData = null; // 一覧の「StrivePD のスクショ」(striveList の結果)
+  let striveLoading = false;
+  const isPatient = () => cfg.role === 'patient';
+  const SHOT_BATCH = 24; // 一度に選べる枚数
+  async function uploadShots(files) {
+    if (!files.length) return;
+    if (uploading) { toast(isPatient() ? 'いま おくっているところ。おわるまで まってね' : 'いま画像を送っています。終わるまでお待ちください'); return; }
+    if (files.length > SHOT_BATCH) {
+      toast(isPatient() ? `いちどに えらべるのは ${SHOT_BATCH}まい までだよ(いま ${files.length}まい)。えらびなおしてね` : `一度に選べるのは ${SHOT_BATCH}枚までです(${files.length}枚選ばれました)。選び直してください`, { label: 'OK', onClick: () => {} });
+      return;
+    }
+    uploading = true; striveProg = { i: 0, n: files.length };
+    let done = 0, stop = '', thanks = null;
+    const fails = [];
+    try {
+      for (let i = 0; i < files.length && !stop; i++) {
+        striveProg.i = i + 1; render();
+        let img;
+        try { img = await shrinkShot(files[i]); } catch (e) { fails.push(e.message === 'big' ? '大きすぎる画像' : '読めない画像'); continue; }
+        let r;
+        try { r = await call({ action: 'striveUpload', name: String(files[i].name || '').replace(/\.[^.]+$/, '').slice(0, 40), data: img.data, w: img.w, h: img.h }); }
+        catch (e) { stop = 'net'; break; }
+        if (!r.ok) {
+          if (r.error === 'unauthorized') { stop = 'auth'; break; }
+          fails.push(r.message || '保存できない画像');
+          if (r.error === 'too_many') stop = 'full';
+          continue;
+        }
+        done++;
+        if (r.thanks) thanks = r.thanks;
+        await cachePutKey(shotKey(r.item.id), dataUrlToBlob(img.data));
+        if (cache) { cache.strive = r.strive; save(KEYS.state, cache); }
+        if (striveData) { striveData.items = striveData.items.concat([r.item]); striveData.strive = r.strive; }
+      }
+    } finally {
+      uploading = false; striveProg = null;
+    }
+    if (stop === 'auth') { logout('ログインし直してください'); return; }
+    const rest = files.length - done - fails.length;
+    if (isPatient()) {
+      if (done) {
+        // お礼のスタンプが届いた時は、そちらがふきだしに出る(下の refresh で届く)
+        if (!thanks) { patMsg = `しゃしん ${done}まい、とどいたよ。ありがとう！`; clearTimeout(patTimer); patTimer = setTimeout(() => { patMsg = null; render(); }, 8000); }
+        if (fails.length || rest) toast(`${done}まい とどいたよ。${fails.length + rest}まいは おくれなかったので、あとで もう一度 えらんでね`, { label: 'OK', onClick: () => {} });
+      } else toast(stop === 'net' ? 'つながらなかったので、あとで もう一度 えらんでね' : stop === 'full' ? fails[fails.length - 1] : 'しゃしんを おくれませんでした', { label: 'OK', onClick: () => {} });
+    } else if (done && !fails.length && !rest) toast(`${done}枚を送りました`);
+    else if (done) toast(`${done}枚を送りました。${fails.length + rest}枚は送れませんでした(${stop === 'net' ? '通信できませんでした' : fails.filter((m, i) => fails.indexOf(m) === i).join(' / ')})`, { label: 'OK', onClick: () => {} });
+    else toast(stop === 'net' ? '通信できませんでした。もう一度お試しください' : fails[0] || '送れませんでした');
+    render(); refresh(true);
+  }
+  // 「これでおしまい」(8 枚そろわなくても送り終わりにする)
+  function striveDone() {
+    enqueue({ action: 'striveDone' }, (c) => { if (c.strive) c.strive = Object.assign({}, c.strive, { done: true, show: false }); });
+    if (isPatient()) { patMsg = 'とどけてくれて、ありがとう！'; clearTimeout(patTimer); patTimer = setTimeout(() => { patMsg = null; render(); }, 8000); render(); }
+  }
+  // 一覧の「StrivePD のスクショ」を読む
+  async function loadStrive() {
+    if (striveLoading) return;
+    striveLoading = true;
+    try {
+      const d = await call({ action: 'striveList' });
+      if (d.ok) striveData = d;
+    } catch (e) { /* 次に開いた時に */ }
+    striveLoading = false;
+    if (tab === 'list') render();
+    if (sheet && sheet.type === 'striveweek') renderOverlay();
+  }
+  // お礼のスタンプを選ぶ(type = '' ならなし)。本人の画面で同じ見た目を出せるよう、ことばと絵の控えも一緒に保存する
+  function saveThanks(type, message) {
+    let v = '';
+    if (type) {
+      const def = reactionsNow().find((r) => r.id === type);
+      if (!def) { toast('この種類は使えません'); return; }
+      const image = def.image && STATIC.library[def.image] ? STATIC.library[def.image] : def.image;
+      v = JSON.stringify({ type, label: def.label, image, message: String(message || '').trim().slice(0, 200) });
+    }
+    const settings = { strive_thanks: v };
+    enqueue({ action: 'saveSettings', settings }, (c) => { c.settings = Object.assign({}, c.settings, settings); });
+  }
+  function thanksNow(s) { try { const t = s && s.strive_thanks ? JSON.parse(s.strive_thanks) : null; return t && t.type ? t : null; } catch (e) { return null; } }
 
   /* ========== 描画の入口 ==========
    * 文字を入力している途中は描き直さない(入力中の文字が消えないように)。入力欄から離れたら描き直す */
@@ -1845,10 +2102,46 @@
         break;
       case 'refresh': sheet = null; renderOverlay(); refresh(); toast('更新しています…'); break;
       case 'logout': if (confirm('ログアウトしますか？(送信済みの記録は消えません)')) logout(); break;
-      case 'tab': tab = el.dataset.tab; if (tab === 'list') { listData = null; listPage = 0; listFailed = false; } render(); break;
+      case 'tab': tab = el.dataset.tab; if (tab === 'list') { listData = null; listPage = 0; listFailed = false; loadStrive(); } render(); break;
       case 'list-page': listPage = Math.max(0, listPage + parseInt(el.dataset.d, 10)); render(); break;
       case 'list-retry': listFailed = false; listData = null; render(); break;
-      case 'export': exportData(el.dataset.fmt); break;
+      case 'export': if (el.dataset.fmt === 'strive') exportStrive(); else exportData(el.dataset.fmt); break;
+      case 'strive-done': striveDone(); break;
+      case 'strive-ask': {
+        const settings = { strive_ask: logicalToday() };
+        enqueue({ action: 'saveSettings', settings }, (c) => { c.settings = Object.assign({}, c.settings, settings); if (c.strive) c.strive = Object.assign({}, c.strive, { asked: true, show: !c.strive.done && c.strive.on }); });
+        if (striveData && striveData.strive) striveData.strive = Object.assign({}, striveData.strive, { asked: true, show: true });
+        render();
+        toast('きょうだけ、本人の画面に案内を出しました');
+        break;
+      }
+      case 'strive-week': sheet = { type: 'striveweek', week: el.dataset.week }; renderOverlay(); break;
+      case 'shot-open': sheet = { type: 'shot', id: el.dataset.id, week: sheet && sheet.week }; renderOverlay(); break;
+      case 'shot-del': {
+        const m = ((striveData && striveData.items) || []).find((x) => x.id === sheet.id);
+        if (!m || !confirm('この画像を消しますか？(元に戻せません)')) break;
+        enqueue({ action: 'striveDelete', id: m.id });
+        striveData.items = striveData.items.filter((x) => x.id !== m.id);
+        sheet = { type: 'striveweek', week: m.week }; renderOverlay(); render();
+        toast('消しました');
+        break;
+      }
+      case 'strive-week-del': {
+        const w = sheet.week;
+        const n = ((striveData && striveData.items) || []).filter((x) => x.week === w).length;
+        if (!n || !confirm(`${weekLabel(w)}の画像 ${n}枚を全部消しますか？(元に戻せません。分析用に保存したあとに消してください)`)) break;
+        enqueue({ action: 'striveDelete', week: w });
+        striveData.items = striveData.items.filter((x) => x.week !== w);
+        sheet = null; renderOverlay(); render();
+        toast(`${n}枚を消しました`);
+        break;
+      }
+      case 'strive-thanks': {
+        const inp = document.getElementById('strive-thanks-msg');
+        saveThanks(el.dataset.type, inp ? inp.value : '');
+        toast(el.dataset.type ? 'お礼のスタンプを選びました' : 'お礼のスタンプは送らないようにしました');
+        break;
+      }
       case 'cal-open': openCal(); break;
       case 'cal-month': {
         const [y, m] = sheet.month.split('-').map(Number);
@@ -1900,7 +2193,7 @@
   // 選ぶ欄を押した時に、その欄そのものに受け取り役を付けておく
   function onFilesPicked(t) {
     const files = Array.from(t.files || []); const target = t.dataset.upload; t.value = '';
-    uploadImages(files, target);
+    if (target === 'strive') uploadShots(files); else uploadImages(files, target);
   }
   document.addEventListener('click', (e) => {
     const t = e.target;
@@ -1911,6 +2204,7 @@
     const t = e.target;
     if (t.matches && t.matches('input[type=file][data-upload]')) { onFilesPicked(t); return; }
     if (t.dataset && t.dataset.export) { exportRange = Object.assign({}, exportRange, { [t.dataset.export]: t.value }); return; }
+    if (t.id === 'strive-thanks-msg') { const th = thanksNow(settingsNow()); if (th) { saveThanks(th.type, t.value); toast('ことばを保存しました'); } return; }
     if (t.dataset && t.dataset.obs) { saveObs({ [t.dataset.obs]: t.value.trim() }); return; }
     if (t.dataset && t.dataset.setting) {
       const settings = { [t.dataset.setting]: t.value };
@@ -1947,7 +2241,7 @@
   document.addEventListener('keydown', (e) => {
     if (e.key === 'Enter' && e.target && e.target.id === 'med-time') { e.preventDefault(); medTimeSave(); }
     else if (e.key === 'Enter' && e.target && e.target.dataset && e.target.dataset.obsHm) e.target.blur();
-    else if (e.key === 'Enter' && e.target && (e.target.id === 'prn-name' || e.target.id === 'med-name' || e.target.id === 'memo-time')) { e.preventDefault(); e.target.blur(); }
+    else if (e.key === 'Enter' && e.target && (e.target.id === 'prn-name' || e.target.id === 'med-name' || e.target.id === 'memo-time' || e.target.id === 'strive-thanks-msg')) { e.preventDefault(); e.target.blur(); }
   });
 
   document.addEventListener('submit', (e) => {

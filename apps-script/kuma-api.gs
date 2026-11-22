@@ -273,12 +273,16 @@ function toCell(v) {
  * 日付は「論理日」(午前4時区切り)の "YYYY-MM-DD" 文字列。時刻は "HH:MM"。
  * ===================================================================== */
 var Core = (function () {
-  var VERSION = 14;
+  var VERSION = 15;
   var IMAGE_PARTS = 10;       // 1 枚の画像を最大 10 個のセルに分けて入れる
   var IMAGE_CHUNK = 40000;    // 1 セルに入れる文字数(セルの上限は 50,000 文字)
   var IMAGE_META_COLS = 7;    // 画像の表の、データ以外の列の数
   var imageCols = ['id', 'name', 'mime', 'w', 'h', 'created_at', 'deleted'];
   for (var ic = 0; ic < IMAGE_PARTS; ic++) imageCols.push('d' + ic);
+  // StrivePD のスクショ。week = その週の月曜日(StrivePD の「週」と同じ、月曜〜日曜の区切り)、by = 送った人の役割
+  var STRIVE_META_COLS = 9;
+  var striveCols = ['id', 'week', 'name', 'mime', 'w', 'h', 'by', 'created_at', 'deleted'];
+  for (var sc = 0; sc < IMAGE_PARTS; sc++) striveCols.push('d' + sc);
 
   var TABLES = {
     devices:      ['id', 'token_hash', 'role', 'name', 'created_at', 'last_seen'],
@@ -303,7 +307,9 @@ var Core = (function () {
     weather:      ['date', 'place', 'p_mean', 'p_min', 'p_max', 'p_drop', 't_max', 't_min', 't_mean', 'humidity', 'precip', 'wcode', 'hourly', 'final', 'updated_at'],
     reaction:     ['id', 'date', 'from_name', 'type', 'message', 'seen', 'created_at', 'label', 'image'],
     settings:     ['key', 'value'],
-    image:        imageCols
+    image:        imageCols,
+    // StrivePD の「週」と「日」の画面のスクショ(本人が毎週アップする。分析用)。画像のデータは右の列に分けて入れる
+    strive:       striveCols
   };
 
   var DEFAULT_SETTINGS = {
@@ -327,11 +333,15 @@ var Core = (function () {
     health_try_at: '',                     // 同意の前に届いた(保存しなかった)試しの送信
     health_try: '',
     image_config: '',                      // サイトで選んだ画像とリアクションの種類(JSON)
-    weather_place: ''                      // 天気と気圧を調べる場所 "緯度,経度"(小数 2 桁 = 約 1km の粗さ)。空なら調べない
+    weather_place: '',                     // 天気と気圧を調べる場所 "緯度,経度"(小数 2 桁 = 約 1km の粗さ)。空なら調べない
+    strive_on: '0',                        // StrivePD のスクショの案内(1 = 毎週日曜日に、本人と記録する人の画面に出す)
+    strive_thanks: '',                     // 本人が送り終えた時に届くお礼のスタンプ(JSON { type, label, image, message })。空なら送らない
+    strive_ask: '',                        // 記録する人が「きょう本人の画面に案内を出す」を押した日(日曜日のほかに、その日も出す)
+    strive_done_week: ''                   // 送り終わった、いちばん新しい週(月曜日の日付)
   };
   // saveSettings では変えられない設定(それぞれ専用の操作でだけ変わる)
   var PROTECTED_SETTINGS = { health_consent: 1, health_consent_at: 1, health_consent_by: 1, health_last_at: 1, health_last: 1,
-    health_try_at: 1, health_try: 1, image_config: 1 };
+    health_try_at: 1, health_try: 1, image_config: 1, strive_done_week: 1 };
   // 本人の端末に渡す設定(記録の中身や、先生へのメモは渡さない)。本人の名前は、本人の端末のログイン画面のボタンに使う
   var PATIENT_SETTINGS = ['patient_name', 'supporter_name','health_shortcut_url', 'health_shortcut_name', 'health_consent', 'health_consent_at', 'health_last_at', 'image_config'];
 
@@ -517,6 +527,71 @@ var Core = (function () {
   function imageMeta(store) {
     var rows = store.head ? store.head('image', IMAGE_META_COLS) : store.all('image');
     return rows.map(normImageMeta).filter(function (r) { return r.id && !r.deleted; });
+  }
+
+  // ---------- StrivePD のスクショ ----------
+  var STRIVE_FULL = 8;        // 1 週間分 = 「週」の画面 1 枚 + 「日」の画面 7 枚。そろったら送り終わり
+  var STRIVE_WEEK_MAX = 48;   // 1 週間に入れられる枚数(本人が一度に送れる 24 枚 + 足した分や選びまちがいの分)
+  var STRIVE_MAX = 600;       // 全部で入れられる枚数(古い週は記録する人が消せる)
+  function normStrive(r) {
+    return { id: toStr(r.id), week: toStr(r.week), name: toStr(r.name), mime: toStr(r.mime), w: toInt(r.w), h: toInt(r.h),
+      by: toStr(r.by), created_at: toStr(r.created_at), deleted: truthy(r.deleted) ? 1 : 0 };
+  }
+  function striveMeta(store) {
+    var rows = store.head ? store.head('strive', STRIVE_META_COLS) : store.all('strive');
+    return rows.map(normStrive).filter(function (r) { return r.id && !r.deleted; });
+  }
+  function dowOf(ds) { var p = ds.split('-').map(Number); return new Date(Date.UTC(p[0], p[1] - 1, p[2])).getUTCDay(); }
+  // 送ってもらう週: きょうまでで、いちばん近い日曜日に終わる 1 週間(月曜〜日曜)。値はその月曜日。
+  // 日曜日ならその日までの週、月曜〜土曜なら前の週
+  function striveWeek(today) { return addDays(today, -dowOf(today) - 6); }
+  // 案内を出すか: 「出す」の設定で、まだ送り終わっていない週の、日曜日か「きょう出す」を押した日
+  function striveStatus(store, s, env) {
+    var today = env.today(), week = striveWeek(today);
+    var on = s.strive_on === '1';
+    var base = { on: on, week: week, to: addDays(week, 6), full: STRIVE_FULL, sunday: dowOf(today) === 0, asked: s.strive_ask === today };
+    var done = isDateStr(s.strive_done_week) && s.strive_done_week >= week;
+    var count = striveMeta(store).filter(function (r) { return r.week === week; }).length;
+    base.count = count; base.done = done;
+    base.show = on && !done && (base.sunday || base.asked);
+    return base;
+  }
+  // お礼のスタンプの設定(JSON)を確かめて整える。空なら ''
+  function thanksJson(v) {
+    var t = v;
+    if (typeof t === 'string') {
+      if (!t.trim()) return '';
+      try { t = JSON.parse(t); } catch (e) { throw fail('bad_request', 'お礼のスタンプの設定が読めません'); }
+    }
+    if (!t || typeof t !== 'object' || !isReactionType(t.type)) throw fail('bad_request', 'お礼のスタンプの種類が不正です');
+    return JSON.stringify({ type: String(t.type), label: toStr(t.label).trim().slice(0, 30), image: toStr(t.image).slice(0, 300), message: toStr(t.message).trim().slice(0, 200) });
+  }
+  function thanksOf(s) { try { var t = s.strive_thanks ? JSON.parse(s.strive_thanks) : null; return t && isReactionType(t.type) ? t : null; } catch (e) { return null; } }
+  // お礼のスタンプを届ける人の名前: 設定の「記録する人の名前」、なければ最後にログインした記録する人
+  function supporterName(store, s) {
+    var n = toStr(s.supporter_name).trim();
+    if (n) return n;
+    var ds = store.all('devices').filter(function (d) { return toStr(d.role) === 'supporter' && toStr(d.name).trim(); })
+      .sort(function (a, b) { return toStr(a.created_at) < toStr(b.created_at) ? 1 : -1; });
+    return ds.length ? toStr(ds[0].name).trim() : '家族';
+  }
+  // 送り終わった印を付ける。本人が送り終えた時は、お礼のスタンプを「ひとこと」として届ける
+  // (絵とことばは、いまの「ひとことの種類」にあればそれを、なければ選んだ時の控えを使う)
+  function finishStrive(store, s, env, device, week) {
+    setSetting(store, 'strive_done_week', week);
+    s.strive_done_week = week;
+    var t = thanksOf(s);
+    if (!t || device.role !== 'patient') return null;
+    var label = toStr(t.label), image = toStr(t.image);
+    try {
+      var cfg = s.image_config ? JSON.parse(s.image_config) : null;
+      var cur = cfg && Array.isArray(cfg.reactions) ? findOne(cfg.reactions, 'id', t.type) : null;
+      if (cur) { label = toStr(cur.label) || label; image = toStr(cur.image); }
+    } catch (e) { /* 控えを使う */ }
+    var row = { id: env.uuid(), date: env.today(), from_name: supporterName(store, s), type: t.type, message: toStr(t.message).slice(0, 200),
+      seen: 0, created_at: env.now(), label: label.slice(0, 30), image: image.slice(0, 300) };
+    store.insert('reaction', row);
+    return normReaction(row);
   }
   function startDate(s) { return isDateStr(s.start_date) ? s.start_date : ''; }
   // 自動送信の「区切り」: 午前4時を日の境目にし、1日2回なら 4時〜16時 と 16時〜翌4時 に分ける
@@ -848,7 +923,8 @@ var Core = (function () {
   actions.room = function (req, store, env, device) {
     var reactions = store.all('reaction').map(normReaction).filter(function (r) { return !r.seen; })
       .sort(function (a, b) { return a.created_at < b.created_at ? -1 : 1; }).slice(-5);
-    return { ok: true, room: true, reactions: reactions, settings: patientSettings(getSettings(store)), images: imageMeta(store) };
+    var s = getSettings(store);
+    return { ok: true, room: true, reactions: reactions, settings: patientSettings(s), images: imageMeta(store), strive: striveStatus(store, s, env) };
   };
 
   // 記録する人の画面: その日の観察・自動の値・メモ
@@ -903,6 +979,7 @@ var Core = (function () {
       memos: memosBetween(store, date, date),
       weather: weatherBetween(store, date, date, s.weather_place)[0] || null,
       weather_need: weatherNeed(store, s, env),
+      strive: striveStatus(store, s, env),
       sent: sent,
       progress: { since: since, recorded: recorded, days: daysBetween(since, date) + 1 },
       settings: s, images: imageMeta(store)
@@ -1153,6 +1230,13 @@ var Core = (function () {
       s.health_shortcut_url = u;
     }
     if ('weather_place' in s) s.weather_place = placeOf(s.weather_place);
+    if ('strive_on' in s) s.strive_on = truthy(s.strive_on) ? '1' : '0';
+    if ('strive_thanks' in s) s.strive_thanks = thanksJson(s.strive_thanks);
+    if ('strive_ask' in s) {
+      var ask = toStr(s.strive_ask).trim();
+      if (ask && !isDateStr(ask)) throw fail('bad_request', '案内を出す日は 2026-11-22 の形です');
+      s.strive_ask = ask;
+    }
     for (var k in s) {
       if (!(k in DEFAULT_SETTINGS) || PROTECTED_SETTINGS[k]) continue;
       setSetting(store, k, toStr(s[k]).slice(0, 2000));
@@ -1297,13 +1381,80 @@ var Core = (function () {
     return { ok: true, settings: getSettings(store) };
   };
 
+  // ---------- StrivePD のスクショ(本人も記録する人も送れる。見る・消すのは記録する人だけ) ----------
+  // 1 枚ずつ送る。入るのは「送ってもらう週」(striveWeek)。その週が 8 枚になったら送り終わり
+  actions.striveUpload = function (req, store, env, device) {
+    var m = /^data:(image\/(?:png|jpeg|webp));base64,([A-Za-z0-9+\/]+=*)$/.exec(toStr(req.data));
+    if (!m) throw fail('bad_request', '画像の形式が読めません(PNG・JPEG・WebP)');
+    var b64 = m[2];
+    if (b64.length > IMAGE_PARTS * IMAGE_CHUNK) throw fail('too_large', '画像が大きすぎます');
+    var s = getSettings(store);
+    var week = striveWeek(env.today());
+    var all = striveMeta(store);
+    if (all.length >= STRIVE_MAX) throw fail('too_many', '保存できる枚数がいっぱいです(記録する人が「一覧」で古い週を消すと、また送れます)');
+    var n = all.filter(function (r) { return r.week === week; }).length;
+    if (n >= STRIVE_WEEK_MAX) throw fail('too_many', 'この週の分は ' + STRIVE_WEEK_MAX + ' 枚までです');
+    var row = { id: env.uuid(), week: week, name: toStr(req.name).trim().slice(0, 40), mime: m[1], w: toInt(req.w), h: toInt(req.h),
+      by: device.role, created_at: env.now(), deleted: 0 };
+    for (var i = 0; i < IMAGE_PARTS; i++) {
+      var c = b64.slice(i * IMAGE_CHUNK, (i + 1) * IMAGE_CHUNK);
+      row['d' + i] = c ? '~' + c : '';
+    }
+    store.insert('strive', row);
+    var done = isDateStr(s.strive_done_week) && s.strive_done_week >= week;
+    var thanks = !done && n + 1 >= STRIVE_FULL ? finishStrive(store, s, env, device, week) : null;
+    return { ok: true, item: normStrive(row), strive: striveStatus(store, s, env), thanks: thanks };
+  };
+
+  // 「これでおしまい」(8 枚そろわなくても送り終わりにする)
+  actions.striveDone = function (req, store, env, device) {
+    var s = getSettings(store);
+    var st = striveStatus(store, s, env);
+    if (st.done) return { ok: true, strive: st, thanks: null };
+    if (!st.count) throw fail('bad_request', 'まだ 1 枚も届いていません');
+    var thanks = finishStrive(store, s, env, device, st.week);
+    return { ok: true, strive: striveStatus(store, s, env), thanks: thanks };
+  };
+
+  // 届いたスクショの一覧(画像のデータは入れない。古い順)
+  actions.striveList = function (req, store, env, device) {
+    var s = getSettings(store);
+    var items = striveMeta(store).sort(function (a, b) { return a.created_at < b.created_at ? -1 : a.created_at > b.created_at ? 1 : 0; });
+    return { ok: true, items: items, strive: striveStatus(store, s, env) };
+  };
+
+  actions.getStrive = function (req, store, env, device) {
+    var id = toStr(req.id);
+    if (!/^[A-Za-z0-9-]{8,64}$/.test(id)) throw fail('bad_request', 'id が不正です');
+    var r = store.find ? store.find('strive', 'id', id) : findOne(store.all('strive'), 'id', id);
+    if (!r || truthy(r.deleted)) throw fail('not_found', '画像が見つかりません');
+    var b64 = '';
+    for (var i = 0; i < IMAGE_PARTS; i++) b64 += toStr(r['d' + i]).replace(/^~/, '');
+    return { ok: true, id: id, mime: toStr(r.mime), data: 'data:' + toStr(r.mime) + ';base64,' + b64 };
+  };
+
+  // 1 枚(id)か、1 週間分(week = 月曜日)を消す。データの列を空にして、行は「消した」印で残す
+  actions.striveDelete = function (req, store, env, device) {
+    var patch = { deleted: 1 };
+    for (var i = 0; i < IMAGE_PARTS; i++) patch['d' + i] = '';
+    var ids = [];
+    if (isDateStr(req.week)) ids = striveMeta(store).filter(function (r) { return r.week === req.week; }).map(function (r) { return r.id; });
+    else if (toStr(req.id)) ids = [toStr(req.id)];
+    else throw fail('bad_request', 'id か week が必要です');
+    var n = 0;
+    ids.forEach(function (id) { if (store.update('strive', 'id', id, patch)) n++; });
+    if (!n && !isDateStr(req.week)) throw fail('not_found', '画像が見つかりません');
+    return { ok: true, deleted: n };
+  };
+
   // 役割ごとに許可するアクション。
-  // patient(本人): くまの部屋を見る・ひとことに「ありがとう」・連携の同意だけ。記録は読めない
+  // patient(本人): くまの部屋を見る・ひとことに「ありがとう」・連携の同意・StrivePD のスクショを送ることだけ。記録は読めない
   // health(ショートカットの連携キー): 健康データを送ることだけ
   var ALLOW = {
-    patient:   ['me', 'room', 'seenReactions', 'consentHealth', 'getImage'],
+    patient:   ['me', 'room', 'seenReactions', 'consentHealth', 'getImage', 'striveUpload', 'striveDone'],
     supporter: ['me', 'state', 'saveObs', 'addMemo', 'updateMemo', 'deleteMemo', 'react', 'reactions', 'getSettings', 'saveSettings', 'report',
-                'createKey', 'consentHealth', 'getImage', 'uploadImage', 'deleteImage', 'saveImageConfig', 'saveWeather'],
+                'createKey', 'consentHealth', 'getImage', 'uploadImage', 'deleteImage', 'saveImageConfig', 'saveWeather',
+                'striveUpload', 'striveDone', 'striveList', 'getStrive', 'striveDelete'],
     health:    ['health', 'need']
   };
 
