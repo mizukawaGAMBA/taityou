@@ -94,6 +94,19 @@
     if (h > 23 || m > 59) return null;
     return `${pad(h)}:${pad(m)}`;
   }
+  // 布団に入った時刻(手で入れた時刻)から、iPhone の睡眠の眠り始め(sl.bed)までの分。
+  // 眠り始めが布団より 30 分以上前か 3 時間より後なら、別の眠りとみなして null(report.js も同じ)
+  function sleepLatency(bed, onset) {
+    const m = (t) => { const x = /^(\d{1,2}):(\d{2})$/.exec(String(t || '')); return x ? +x[1] * 60 + +x[2] : null; };
+    const b = m(bed), s = m(onset);
+    if (b === null || s === null) return null;
+    let d = s - b;
+    if (d < -720) d += 1440; else if (d > 720) d -= 1440; // 日付をまたいだ分
+    return d < -30 || d > 180 ? null : Math.max(0, d);
+  }
+  function latencyOf(o, sl) { return sleepLatency(o && o.bed_time, sl && sl.bed); }
+  // 寝つきの推定: 15 分まで = すぐ眠れた(0)、30 分まで = 少し時間がかかった(1)、それより長い = なかなか眠れなかった(2)
+  function latencyLevel(min) { return min === null || min === undefined ? null : min <= 15 ? 0 : min <= 30 ? 1 : 2; }
   // 欄には 4 桁で出す("07:30" → "0730")
   const hmInput = (attrs, value) => `<input type="text" class="hm" inputmode="numeric" autocomplete="off" maxlength="5" placeholder="例: 0730" value="${esc(String(value || '').replace(':', ''))}" ${attrs}>`;
   // 朝の薬のボタンには、設定の「朝の薬で分けて書く薬の名前」を出す(名前はスプレッドシートにだけ保存し、プログラムには書かない)
@@ -756,6 +769,21 @@
       `<button class="chip-btn ${sel.has(v) ? 'sel' : ''}" data-act="obs-set" data-f="${key}" data-v="${v}" aria-pressed="${sel.has(v)}">${l}</button>`).join('')}</div>`;
   }
 
+  // 寝つきの欄の下: 時計(iPhone の睡眠)で布団に入ってから眠るまでの分。寝つきを選んでいない日は、そこから推定した寝つきを出す
+  function onsetHint(o, sl) {
+    const lat = latencyOf(o, sl);
+    const names = SCALES.sleep_onset.opts.map(([, l]) => l);
+    const manual = o.sleep_onset != null && o.sleep_onset !== '';
+    if (lat !== null) {
+      const clock = `布団に入ってから約 <b>${lat}分</b> で眠っています(眠り始め ${esc(sl.bed)})`;
+      return !manual
+        ? `<p class="help auto-hint">未入力なので、時計から推定します: ${clock}。→「${names[latencyLevel(lat)]}」</p>`
+        : `<p class="help">時計では、${clock}。</p>`;
+    }
+    if (manual || !o.bed_time) return '';
+    return sl && sl.bed ? `<p class="help">時計の眠り始め(${esc(sl.bed)})が布団に入った時刻から離れているので、推定しません。</p>`
+      : '<p class="help">iPhone の睡眠が届くと、眠るまでの分から寝つきを推定します(あくる朝以降)。</p>';
+  }
   function viewRecord(data) {
     const today = logicalToday();
     const sd = startDate();
@@ -814,7 +842,8 @@
       night: () => card('夜のようす', scaleField('evening', o) +
         '<p class="help" style="margin:-4px 0 8px">夕食のあとから布団に入るまでを、あなたの目で見た印象で。</p>' +
         scaleField('bath', o) + bed + scaleField('sleep_onset', o) +
-        '<p class="help" style="margin:-4px 0 8px">見ていて分かった日だけ。分からない日は空のままで。</p>' +
+        '<p class="help" style="margin:-4px 0 8px">見ていて分かった日だけ。分からない日は空のままで(布団に入った時刻を入れておくと、時計の眠り始めから推定します)。</p>' +
+        onsetHint(o, sl) +
         noteField(o, 'note_night', '例: 寝る前に足がつらそうだった')),
       look: () => card('見た目のようす・本人のことば', scaleField('movement', o) +
         '<p class="help" style="margin:-4px 0 8px">あなたの目で見た印象で、いちばん目立った時で。</p>' +
@@ -947,7 +976,9 @@
       ['外出', (o) => sym(['無', '近', '外'], o.outing), 1], ['仕事など', (o) => actAbbr(o.activity)],
       ['食事', (o) => sym(['×', '少', '半', '普', '多'], o.meal), 1], ['間食', (o) => (o.night_snack === 1 ? '●' : '')]],
     night: [['寝るまで', (o) => sym(SYM3, o.evening)], ['お風呂', (o) => sym(['–', 'シ', '湯'], o.bath)],
-      ['布団に入った', (o, h, n, sl) => timeCell(o.bed_time, sl && sl.bed)], ['寝つき', (o) => sym(SYM3, o.sleep_onset)]],
+      ['布団に入った', (o, h, n, sl) => timeCell(o.bed_time, sl && sl.bed)],
+      ['寝つき', (o, h, n, sl) => sym(SYM3, o.sleep_onset) || (latencyOf(o, sl) !== null ? { auto: SYM3[latencyLevel(latencyOf(o, sl))] } : '')],
+      ['眠るまで', (o, h, n, sl) => (latencyOf(o, sl) !== null ? latencyOf(o, sl) + '分' : ''), 0, 1]],
     look: [['見た目', (o) => (o.movement != null ? String(o.movement) : ''), 1],
       ['ことば', (o) => setAbbr(o.complaint, [['pain', '痛'], ['dizzy', 'ぐ'], ['other', '他']])]],
     easy: [['楽な時間', (o) => setAbbr(o.easy_times, [['morning', '朝'], ['noon', '昼'], ['evening', '夕'], ['night', '夜']])],
@@ -1026,6 +1057,7 @@
       <li>食事: 多 よく食べた 普 ふつう 半 半分くらい 少 少し × ほぼ食べず / 間食: ● 寝る前の間食</li>
       <li>寝るまで: ○ おだやか △ 少しつらそう × つらそう / お風呂: 湯 湯ぶね シ シャワー – 入らなかった / 布団に入った時刻(深夜 0〜3 時台はその日の夜) / 寝つき: ○ すぐ眠れた △ 少し時間がかかった × なかなか眠れなかった</li>
       <li>灰色の時刻 = 入れていない日の、iPhone の睡眠の時刻(起きた時刻 = 目が覚めた時刻、布団に入った = 眠り始めた時刻)。灰色の起きた時刻も「記録した数」に数えます</li>
+      <li>眠るまで = 布団に入った時刻(入れた日だけ)から、時計の眠り始めまでの分 / 灰色の寝つき = 寝つきを選んでいない日に、その分から推定(15分まで ○、30分まで △、それより長い ×)</li>
       <li>見た目: 不随意運動 1〜5 / ことば: 痛 痛み ぐ ぐるぐる 他 その他</li>
       <li>楽な時間: 朝 昼 夕 夜 / 薬: ● 全部・飲んだ ◐ ${esc(medName(s))}以外 ◔ 一部 ○ 飲まなかった / 早く休んだ: ● 寝る前の薬が18時より前で「合っている」を押した日(その夜の眠りは次の日の列)</li>
       <li>歩く速さ km/時 / 歩幅 cm / 左右差(歩行非対称性)・両足支持(両足で支えている時間)・歩行安定性 % / 安静時心拍 回/分 / 心拍変動 ms(歩き方は iPhone をポケットに入れて歩いた日だけ)</li>
@@ -1166,6 +1198,7 @@
     codes.bed_time = { label: '布団に入った時刻(記録する人が見た時刻。深夜 0〜3 時台は、その日の夜の続き)。Apple Watch の寝た時刻は health の bed_start' };
     codes.sleep_times = { label: '起きてきた時刻・布団に入った時刻を入れていない日に、代わりに使う iPhone の睡眠の時刻(画面・レポート・CSV で使う)。wake = その日の朝に目が覚めた時刻(その日の health の bed_end)、bed = その日の夜に眠り始めた時刻(次の日の health の bed_start)。observe には入れていない' };
     codes.sleep_onset.label = '寝つき(記録する人が見ていて分かった日だけ)';
+    codes.sleep_latency = { label: '布団に入った時刻(observe の bed_time。手で入れた日だけ)から、その夜の眠り始め(sleep_times の bed)までの分(min)と、そこから推定した寝つき(level: 15分まで 0、30分まで 1、それより長い 2。値の意味は sleep_onset と同じ)。眠り始めが布団より30分以上前・3時間より後の日は入れていない。observe には入れていない' };
     codes.evening.label = '寝るまでのようす(夕食のあとから布団に入るまで。記録する人が見た印象)';
     codes.early_bed = { label: '早く休んだ日(寝る前の薬が18時より前で、記録した人が「合っている」と確かめた日)。夕方からの眠りは次の日の health に1晩として入る', values: { 1: 'はい' } };
     codes.activity = { label: '仕事・習い事(カンマ区切り)', values: Object.fromEntries(ACTIVITY) };
@@ -1188,13 +1221,19 @@
     };
     return codes;
   }
+  // 布団に入った時刻(手で入れた日)から、時計の眠り始めまでの分と、そこから推定した寝つき
+  function latencyMap(data) {
+    const out = {};
+    data.obs.forEach((o) => { const m = latencyOf(o, (data.sleep_times || {})[o.date]); if (m !== null) out[o.date] = { min: m, level: latencyLevel(m) }; });
+    return out;
+  }
   function exportJson(data) {
     const s = data.settings || {};
     return {
       format: 'kuma-export-1', exported_at: new Date().toISOString(), from: data.from, to: data.to,
       settings: Object.fromEntries(['start_date', 'med2_label', 'last_appointment', 'next_appointment'].map((k) => [k, s[k] || ''])),
       codes: exportCodes(s),
-      observe: data.obs, health: data.health, sleep_times: data.sleep_times || {}, memos: (data.memos || []).map((m) => ({ date: m.date, ts: m.ts, text: m.text })),
+      observe: data.obs, health: data.health, sleep_times: data.sleep_times || {}, sleep_latency: latencyMap(data), memos: (data.memos || []).map((m) => ({ date: m.date, ts: m.ts, text: m.text })),
       weather: (data.weather || []).map((w) => ({ date: w.date, weather: wxLabel(w.wcode)[1], wcode: w.wcode, t_max: w.t_max, t_min: w.t_min, t_mean: w.t_mean,
         humidity: w.humidity, precip: w.precip, p_mean: w.p_mean, p_min: w.p_min, p_max: w.p_max, p_drop: w.p_drop, p_diff: w.p_diff, hourly: w.hourly, final: w.final }))
     };
@@ -1211,6 +1250,7 @@
     (data.weather || []).forEach((w) => { wBy[w.date] = w; });
     const wx = (k) => (d) => (wBy[d] ? wBy[d][k] : '');
     const slt = (d, k) => ((data.sleep_times || {})[d] || {})[k] || ''; // 入れていない日に使う iPhone の睡眠の時刻
+    const lat = (d, o) => latencyOf(o, (data.sleep_times || {})[d]); // 布団に入った時刻から眠り始めまでの分
     const cols = [
       ['日付', (d) => d], ['曜日', (d) => DOW[dowOf(d)]],
       ['起きてきた時刻', (d, o) => o.wake_time || slt(d, 'wake')], ['起きてきた時刻の出どころ', (d, o) => (o.wake_time ? '記録' : slt(d, 'wake') ? 'iPhone の睡眠' : '')], ['起き上がり', (d, o) => name('getup', o.getup)], ['ふらつき', (d, o) => name('gait', o.gait)],
@@ -1218,7 +1258,9 @@
       ['食事の量', (d, o) => name('meal', o.meal)], ['寝る前の間食', (d, o) => (o.night_snack === 1 ? 'あり' : '')],
       ['寝るまでのようす', (d, o) => name('evening', o.evening)], ['お風呂', (d, o) => name('bath', o.bath)],
       ['布団に入った時刻', (d, o) => o.bed_time || slt(d, 'bed')], ['布団に入った時刻の出どころ', (d, o) => (o.bed_time ? '記録' : slt(d, 'bed') ? 'iPhone の睡眠' : '')],
-      ['寝つき', (d, o) => name('sleep_onset', o.sleep_onset)],
+      ['寝つき', (d, o) => name('sleep_onset', o.sleep_onset) || name('sleep_onset', latencyLevel(lat(d, o)))],
+      ['寝つきの出どころ', (d, o) => (name('sleep_onset', o.sleep_onset) ? '記録' : lat(d, o) !== null ? '時計から推定' : '')],
+      ['眠るまでの分(時計)', (d, o) => lat(d, o)],
       ['見た目(1-5)', (d, o) => (o.movement != null ? o.movement : '')], ['本人が口にしたこと', (d, o) => setNames(o.complaint, COMPLAINT)],
       ['楽そうだった時間帯', (d, o) => setNames(o.easy_times, EASY)],
       ['朝の薬', (d, o) => medState[parseMed(o.med_morning, true).st] || ''], ['朝の薬の時刻', (d, o) => parseMed(o.med_morning, true).t],

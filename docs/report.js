@@ -35,6 +35,18 @@
   const ACT_SYM = [['work', '出'], ['overtime', '残'], ['lesson', '習'], ['ballet', 'バ']];
   const MED_SYM = { all: '●', yes: '●', noc: '◐', part: '◔', no: '○' };
   // "all 08:10" → { st: 'all', t: '08:10' }。前の版の朝の "yes" は「全部飲んだ」として読む
+  // 布団に入った時刻(手で入れた時刻)から、iPhone の睡眠の眠り始めまでの分(app.js と同じ)。
+  // 眠り始めが布団より 30 分以上前か 3 時間より後なら、別の眠りとみなして null
+  function sleepLatency(bed, onset) {
+    const m = (t) => { const x = /^(\d{1,2}):(\d{2})$/.exec(String(t || '')); return x ? +x[1] * 60 + +x[2] : null; };
+    const b = m(bed), s = m(onset);
+    if (b === null || s === null) return null;
+    let d = s - b;
+    if (d < -720) d += 1440; else if (d > 720) d -= 1440; // 日付をまたいだ分
+    return d < -30 || d > 180 ? null : Math.max(0, d);
+  }
+  // 寝つきの推定: 15 分まで = すぐ眠れた(0)、30 分まで = 少し時間がかかった(1)、それより長い = なかなか眠れなかった(2)
+  const latencyLevel = (min) => (min === null ? null : min <= 15 ? 0 : min <= 30 ? 1 : 2);
   const parseMed = (v, morning) => { const [st0, t] = String(v || '').split(' '); return { st: morning && st0 === 'yes' ? 'all' : (st0 || ''), t: t || '' }; };
   // 他の薬(頓服など)。1 回分は「時刻」か「時刻 薬の名前」
   const prnList = (o) => String((o && o.prn_times) || '').split(',').filter(Boolean);
@@ -94,6 +106,7 @@
     (data.weather || []).forEach((w) => { if (w.date in idx) days[idx[w.date]].w = w; });
     data.health.forEach((h) => { if (h.date in idx) days[idx[h.date]].health = h; });
     data.memos.forEach((m) => { if (m.date in idx) days[idx[m.date]].memos.push(m); });
+    days.forEach((d) => { d.lat = sleepLatency(d.o && d.o.bed_time, d.sl && d.sl.bed); });
 
     const s = data.settings || {};
     const mn = String(s.med2_label || '').trim() || '別の薬';
@@ -171,6 +184,18 @@
       if (!c.length) return '–';
       return def.order.map((v) => `${def.names[v]} ${c.filter((d) => d.o[key] === v).length}日`).join(' / ') + ` <small>(記録 ${c.length}日)</small>`;
     };
+    // 寝つき: 家族が見た寝つきと、時計(Apple Watch)で布団に入ってから眠るまでの分を並べる
+    const latDays = days.filter((d) => d.lat !== null);
+    const onsetText = (() => {
+      let t = `家族の見た目: ${dist('sleep_onset')}`;
+      if (!latDays.length) return t;
+      const ls = latDays.map((d) => d.lat).sort((a, b) => a - b);
+      const lv = (v) => latDays.filter((d) => latencyLevel(d.lat) === v).length;
+      t += `<br>時計で布団から眠るまで: 中央値 約${ls[Math.floor(ls.length / 2)]}分 <small>(短い日 ${ls[0]}分 〜 長い日 ${ls[ls.length - 1]}分、${ls.length}日 / 15分まで ${lv(0)}日・16〜30分 ${lv(1)}日・31分以上 ${lv(2)}日)</small>`;
+      const both = latDays.filter((d) => d.o && d.o.sleep_onset != null);
+      if (both.length) t += `<br><small>両方ある ${both.length}日のうち、家族の見た目と時計の段階が同じだった日 ${both.filter((d) => d.o.sleep_onset === latencyLevel(d.lat)).length}日</small>`;
+      return t + '<br><small>時計の分は、布団に入った時刻を入れた日だけ。Apple Watch は横になって起きている時間も眠りと見やすく、短めに出ることがあります</small>';
+    })();
     const medRow = ([f, label, states]) => {
       const cnt = {}; states.forEach(([k]) => { cnt[k] = 0; });
       days.forEach((d) => { const st = d.o ? parseMed(d.o[f], f === 'med_morning').st : ''; if (st in cnt) cnt[st]++; });
@@ -214,7 +239,7 @@
       ${nightKnown ? `<tr><th>寝るまでのようす</th><td>${dist('evening')}</td></tr>
       <tr><th>お風呂</th><td>${dist('bath')}</td></tr>
       <tr><th>布団に入った時刻</th><td>${bedText}</td></tr>
-      <tr><th>寝つき</th><td>${dist('sleep_onset')}</td></tr>` : ''}
+      <tr><th>寝つき</th><td>${onsetText}</td></tr>` : ''}
       <tr><th>睡眠(Apple Watch)</th><td>平均 ${hm(avg(sleep))} <small>/ 5分以上の目覚め 平均 ${f1(avg(awak))}回${naps.length ? ` / 昼寝など ${naps.length}日(平均 ${Math.round(avg(naps))}分)` : ''}(データ ${sleep.length}日)</small></td></tr>
       <tr><th>歩数(iPhone / Watch)</th><td>平均 ${steps.length ? Math.round(avg(steps)).toLocaleString() + '歩' : '–'} <small>(データ ${steps.length}日)</small></td></tr>
       ${gaitText ? `<tr><th>歩き方(iPhone、期間の平均)</th><td>${gaitText}<br><small>iPhone をポケットに入れて歩いた時に自動で測られる値。左右差・両足支持時間は大きいほど、歩く速さ・歩幅・歩行安定性は小さいほど、歩きにくさの目安</small></td></tr>` : ''}
@@ -275,6 +300,7 @@
     const memos = data.memos.length ? `<ul class="memos">${data.memos.map((m) => `<li><b>${md(m.date)} ${hhmm(m.ts)}</b> ${esc(m.text)}</li>`).join('')}</ul>` : '<p class="empty">なし</p>';
 
     const cell = (key, d) => (d.o && d.o[key] != null ? SC[key].sym[d.o[key]] : '');
+    const onsetCell = (d) => (cell('sleep_onset', d) || (d.lat !== null ? `(${SC.sleep_onset.sym[latencyLevel(d.lat)]})` : '')) + (d.lat !== null ? `<small>${d.lat}分</small>` : '');
     const medCell = (f, d) => {
       const m = parseMed(d.o && d.o[f], f === 'med_morning');
       const early = f === 'med_night' && d.o && d.o.early_bed === 1 ? '<small>早</small>' : '';
@@ -286,7 +312,7 @@
       ${days.map((d) => `<tr><td>${md(d.date)} <span style="color:var(--muted)">${DOW[dowOf(d.date)]}</span></td>
         <td>${timeCell(d, 'wake_time', 'wake')}</td>
         <td class="c">${cell('getup', d)}</td><td class="c">${cell('gait', d)}</td><td class="c">${cell('lying', d)}</td><td class="c">${cell('outing', d)}</td><td class="c">${d.o ? ACT_SYM.filter(([k]) => setOf(d.o.activity).has(k)).map((x) => x[1]).join('') : ''}</td><td class="c">${cell('meal', d)}${d.o && d.o.night_snack === 1 ? '<small>+間</small>' : ''}</td>${nightKnown ? `
-        <td class="c">${cell('evening', d)}${d.o && d.o.bath != null ? `<small>${SC.bath.sym[d.o.bath]}</small>` : ''}</td><td>${timeCell(d, 'bed_time', 'bed')}</td><td class="c">${cell('sleep_onset', d)}</td>` : ''}
+        <td class="c">${cell('evening', d)}${d.o && d.o.bath != null ? `<small>${SC.bath.sym[d.o.bath]}</small>` : ''}</td><td>${timeCell(d, 'bed_time', 'bed')}</td><td class="c">${onsetCell(d)}</td>` : ''}
         <td class="c">${d.o && d.o.movement != null ? d.o.movement : ''}</td>
         ${MEDS.map(([f]) => `<td class="c">${medCell(f, d)}</td>`).join('')}
         <td class="num">${prnCell(d)}</td><td class="c">${d.o && d.o.alcohol === 1 ? 'あり' : ''}</td>
@@ -296,7 +322,7 @@
         <td class="c">${d.w ? `${wxLabel(d.w.wcode)[0]}${d.w.t_max != null && d.w.t_min != null ? `<small>${Math.round(d.w.t_max)}/${Math.round(d.w.t_min)}℃</small>` : ''}` : ''}</td>
         <td class="num">${d.w && d.w.p_mean != null ? `${Math.round(d.w.p_mean)}${d.w.p_diff != null ? `<small>${signed(Math.round(d.w.p_diff), 0).replace('±', '')}</small>` : ''}` : ''}</td>` : ''}</tr>`).join('')}
     </tbody></table>
-    <p class="leg">起床・布団: ( ) は入れていない日で、iPhone の睡眠の時刻(起床 = 目が覚めた時刻、布団 = 眠り始めた時刻) ／ 起上・ふら(ふらつき): ○ スムーズ/なし △ ゆっくり/少し × つらそう/目立つ ／ 横 = 横になっていた時間 ／ 外出: 外 外出できた 近 近所だけ – なし ／ 仕事等: 出 会社出勤 残 残業 習 習い事 バ バレエ ／ 食事: 多 よく食べた 普 ふつう 半 半分くらい 少 少し × ほぼ食べず(+間 = 寝る前の間食あり)${nightKnown ? ' ／ 夜 = 寝るまでのようす ○ おだやか △ 少しつらそう × つらそう(小さな字はお風呂: 湯 湯ぶね シ シャワー – 入らなかった) ／ 布団 = 布団に入った時刻 ／ 寝つき: ○ すぐ眠れた △ 少し時間がかかった × なかなか眠れなかった' : ''} ／ 見た目 = 不随意運動 1〜5 ／ 朝の薬: ● ${esc(mn)}全部 ◔ ${esc(mn)}一部 ◐ ${esc(mn)}以外 ／ 寝る前の薬: ● 飲んだ ◔ 一部 ○ 飲まなかった(空欄は記録なし。小さな数字は飲んだ時刻。早 = 体調などで早く休んだ日で、その夜の眠りは次の日の行) ／ 目覚 = 5分以上目が覚めた回数${wDays.length ? ' ／ 天気: 小さな数字は最高/最低気温 ／ 気圧: 1日の平均 hPa(小さな数字は前の日との差)' : ''}</p>`;
+    <p class="leg">起床・布団: ( ) は入れていない日で、iPhone の睡眠の時刻(起床 = 目が覚めた時刻、布団 = 眠り始めた時刻) ／ 起上・ふら(ふらつき): ○ スムーズ/なし △ ゆっくり/少し × つらそう/目立つ ／ 横 = 横になっていた時間 ／ 外出: 外 外出できた 近 近所だけ – なし ／ 仕事等: 出 会社出勤 残 残業 習 習い事 バ バレエ ／ 食事: 多 よく食べた 普 ふつう 半 半分くらい 少 少し × ほぼ食べず(+間 = 寝る前の間食あり)${nightKnown ? ' ／ 夜 = 寝るまでのようす ○ おだやか △ 少しつらそう × つらそう(小さな字はお風呂: 湯 湯ぶね シ シャワー – 入らなかった) ／ 布団 = 布団に入った時刻 ／ 寝つき: ○ すぐ眠れた △ 少し時間がかかった × なかなか眠れなかった(小さな数字は時計で布団から眠るまでの分。( ) は寝つきを入れていない日に、その分から推定: 15分まで ○、30分まで △、それより長い ×)' : ''} ／ 見た目 = 不随意運動 1〜5 ／ 朝の薬: ● ${esc(mn)}全部 ◔ ${esc(mn)}一部 ◐ ${esc(mn)}以外 ／ 寝る前の薬: ● 飲んだ ◔ 一部 ○ 飲まなかった(空欄は記録なし。小さな数字は飲んだ時刻。早 = 体調などで早く休んだ日で、その夜の眠りは次の日の行) ／ 目覚 = 5分以上目が覚めた回数${wDays.length ? ' ／ 天気: 小さな数字は最高/最低気温 ／ 気圧: 1日の平均 hPa(小さな数字は前の日との差)' : ''}</p>`;
 
     page.innerHTML = header + note + summary +
       `<h2>日ごとの推移</h2><div class="avoid">${chart1}</div>${chartP}<div class="avoid" style="margin-top:8px">${chart2}</div><div class="avoid" style="margin-top:8px">${chart3}</div>${gaitCharts}` +
